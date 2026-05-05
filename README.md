@@ -24,6 +24,18 @@ Run the tray app:
 python -m localnetftp
 ```
 
+Start a foreground debug client:
+
+```powershell
+python scripts/start_debug_client.py
+```
+
+To use a named isolated instance:
+
+```powershell
+python scripts/start_debug_client.py A
+```
+
 Verify core transfer on one machine:
 
 ```powershell
