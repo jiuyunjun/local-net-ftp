@@ -6,6 +6,7 @@ from pathlib import Path
 
 from localnetftp.config import (
     AppConfig,
+    default_config_dir,
     is_start_on_boot_enabled,
     load_config,
     save_config,
@@ -13,6 +14,7 @@ from localnetftp.config import (
 )
 from localnetftp.network import DiscoveryService, create_device_identity
 from localnetftp.transfer import TransferServer, send_paths
+from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
 from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
 
@@ -22,7 +24,7 @@ TRANSFER_LISTEN_PORT = 49200
 
 def run_tray_app() -> int:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtGui import QAction
+    from PySide6.QtGui import QAction, QKeySequence
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -39,6 +41,34 @@ def run_tray_app() -> int:
         QVBoxLayout,
         QWidget,
     )
+
+    class NameEdit(QLineEdit):
+        def __init__(self, text: str) -> None:
+            super().__init__(text)
+            self.setReadOnly(True)
+            self.setObjectName("floatingName")
+            self.setPlaceholderText("我的名字")
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if self.isReadOnly():
+                self.setReadOnly(False)
+                self.setFocus()
+                self.selectAll()
+            super().mousePressEvent(event)
+
+    class PasteInput(QLineEdit):
+        def __init__(self, on_paste) -> None:
+            super().__init__()
+            self._on_paste = on_paste
+            self.setObjectName("pasteInput")
+            self.setPlaceholderText("粘贴文字 / 图片 / 文件")
+
+        def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.matches(QKeySequence.Paste):
+                self._on_paste()
+                event.accept()
+                return
+            super().keyPressEvent(event)
 
     class AppRuntime:
         def __init__(self) -> None:
@@ -122,9 +152,7 @@ def run_tray_app() -> int:
             self.setWindowFlag(Qt.Tool, True)
             self._initial_position_applied = False
 
-            self.device_name = QLineEdit(self._runtime.config.device_name)
-            self.device_name.setObjectName("floatingName")
-            self.device_name.setPlaceholderText("我的名字")
+            self.device_name = NameEdit(self._runtime.config.device_name)
             self.device_name.editingFinished.connect(self._save_device_name)
 
             self.peer_list = QListWidget()
@@ -133,11 +161,14 @@ def run_tray_app() -> int:
             self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
+            self.paste_input = PasteInput(self._paste_clipboard)
+
             layout = QVBoxLayout(self)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(6)
             layout.addWidget(self.device_name)
             layout.addWidget(self.peer_list, 1)
+            layout.addWidget(self.paste_input)
 
             self.setStyleSheet(_floating_stylesheet())
 
@@ -153,6 +184,7 @@ def run_tray_app() -> int:
         def reload_device_name(self) -> None:
             self.device_name.blockSignals(True)
             self.device_name.setText(self._runtime.config.device_name)
+            self.device_name.setReadOnly(True)
             self.device_name.blockSignals(False)
 
         def apply_initial_position(self, app: QApplication) -> None:
@@ -191,6 +223,7 @@ def run_tray_app() -> int:
             if not device_name:
                 self.reload_device_name()
                 return
+            self.device_name.setReadOnly(True)
             if device_name == self._runtime.config.device_name:
                 return
 
@@ -201,6 +234,37 @@ def run_tray_app() -> int:
                 device_id=self._runtime.config.device_id,
             )
             self.set_status(self._runtime.save_settings(config))
+
+        def _paste_clipboard(self) -> None:
+            paths = self._paths_from_clipboard()
+            if paths:
+                self.paste_input.clear()
+                self._confirm_and_send(paths)
+
+        def _paths_from_clipboard(self) -> list[Path]:
+            clipboard = QApplication.clipboard()
+            mime_data = clipboard.mimeData()
+
+            if mime_data.hasUrls():
+                return local_paths_from_urls(mime_data.urls())
+
+            clipboard_dir = default_config_dir() / "clipboard"
+            clipboard_dir.mkdir(parents=True, exist_ok=True)
+
+            if mime_data.hasImage():
+                path = timestamped_clipboard_path(clipboard_dir, ".png")
+                image = clipboard.image()
+                image.save(str(path), "PNG")
+                return [path]
+
+            if mime_data.hasText():
+                text = mime_data.text()
+                if text:
+                    path = timestamped_clipboard_path(clipboard_dir, ".txt")
+                    path.write_text(text, encoding="utf-8")
+                    return [path]
+
+            return []
 
         def _selected_peer_names(self) -> list[str]:
             return [peer.identity.device_name for peer in self._selected_peers()]
@@ -474,10 +538,22 @@ def _floating_stylesheet() -> str:
     QLineEdit#floatingName {
         min-height: 28px;
         padding: 3px 8px;
-        border: 1px solid rgba(132, 146, 166, 140);
+        border: 1px solid transparent;
         border-radius: 6px;
-        background-color: rgba(255, 255, 255, 230);
+        background-color: transparent;
         font-weight: 600;
+    }
+    QLineEdit#floatingName:focus {
+        border: 1px solid rgba(132, 146, 166, 140);
+        background-color: rgba(255, 255, 255, 230);
+    }
+    QLineEdit#pasteInput {
+        min-height: 28px;
+        padding: 3px 8px;
+        border: 1px solid rgba(132, 146, 166, 130);
+        border-radius: 6px;
+        background-color: rgba(255, 255, 255, 220);
+        color: #334155;
     }
     QListWidget {
         min-height: 180px;

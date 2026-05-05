@@ -4,6 +4,7 @@ import json
 import socket
 import struct
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -78,6 +79,14 @@ def safe_destination_path(receive_dir: Path, relative_path: str) -> Path:
     if destination != root and root not in destination.parents:
         raise ValueError(f"Transfer path escapes receive directory: {relative_path}")
     return destination
+
+
+def available_destination_path(path: Path, now: datetime | None = None) -> Path:
+    if not path.exists():
+        return path
+
+    timestamp = (now or datetime.now()).strftime("%Y%m%d%H%M%S%f")[:-3]
+    return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
 
 
 def send_json(sock: socket.socket, payload: dict[str, Any]) -> None:

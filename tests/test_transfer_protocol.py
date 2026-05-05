@@ -1,8 +1,9 @@
 from pathlib import Path
+from datetime import datetime
 
 import pytest
 
-from localnetftp.transfer import safe_destination_path, scan_transfer_items
+from localnetftp.transfer import available_destination_path, safe_destination_path, scan_transfer_items
 
 
 def test_scan_transfer_items_includes_files_and_directories(tmp_path):
@@ -36,3 +37,12 @@ def test_safe_destination_path_rejects_traversal(tmp_path):
 
 def test_safe_destination_path_allows_nested_relative_path(tmp_path):
     assert safe_destination_path(tmp_path, "folder/a.txt") == (tmp_path / "folder" / "a.txt").resolve()
+
+
+def test_available_destination_path_adds_timestamp_when_file_exists(tmp_path):
+    existing = tmp_path / "a.txt"
+    existing.write_text("old", encoding="utf-8")
+
+    destination = available_destination_path(existing, datetime(2026, 5, 6, 1, 2, 3, 456000))
+
+    assert destination == tmp_path / "a_20260506010203456.txt"

@@ -13,6 +13,7 @@ from localnetftp.transfer.protocol import (
     TRANSFER_VERSION,
     recv_file_bytes,
     recv_json,
+    available_destination_path,
     safe_destination_path,
     send_json,
 )
@@ -90,7 +91,9 @@ class TransferServer:
                     size = frame.get("size")
                     if not isinstance(size, int) or size < 0:
                         raise ValueError("Transfer file size must be a non-negative integer.")
-                    destination = safe_destination_path(self._receive_dir, _relative_path(frame))
+                    destination = available_destination_path(
+                        safe_destination_path(self._receive_dir, _relative_path(frame))
+                    )
                     recv_file_bytes(client, destination, size)
                     continue
                 raise ValueError("Unsupported transfer frame type.")
