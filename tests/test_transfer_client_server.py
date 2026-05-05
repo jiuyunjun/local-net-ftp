@@ -35,6 +35,27 @@ def test_send_paths_transfers_file_and_folder(tmp_path):
     assert (receive_dir / "single.txt").read_text(encoding="utf-8") == "world"
 
 
+def test_send_paths_reports_received_roots(tmp_path):
+    receive_dir = tmp_path / "receive"
+    source_dir = tmp_path / "source"
+    nested = source_dir / "nested"
+    nested.mkdir(parents=True)
+    (nested / "a.txt").write_text("hello", encoding="utf-8")
+    single_file = tmp_path / "single.txt"
+    single_file.write_text("world", encoding="utf-8")
+    received = []
+
+    server = TransferServer(receive_dir=receive_dir, port=_free_port(), on_received=received.append)
+    server.start()
+    try:
+        send_paths("127.0.0.1", server._port, [source_dir, single_file])
+        _wait_for(lambda: received)
+    finally:
+        server.stop()
+
+    assert received[0].paths == [receive_dir / "source", receive_dir / "single.txt"]
+
+
 def test_send_paths_reports_progress(tmp_path):
     receive_dir = tmp_path / "receive"
     single_file = tmp_path / "single.txt"

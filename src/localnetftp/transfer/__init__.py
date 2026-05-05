@@ -7,12 +7,13 @@ from localnetftp.transfer.protocol import (
     safe_destination_path,
     scan_transfer_items,
 )
-from localnetftp.transfer.server import TransferServer
+from localnetftp.transfer.server import ReceiveResult, TransferServer
 
 __all__ = [
     "TransferItem",
     "TransferProgress",
     "TransferServer",
+    "ReceiveResult",
     "available_destination_path",
     "safe_destination_path",
     "scan_transfer_items",

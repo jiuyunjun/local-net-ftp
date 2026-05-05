@@ -3,6 +3,7 @@ from __future__ import annotations
 import socket
 import threading
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,11 +38,26 @@ class ReceivePlan:
     sha256: str
 
 
+@dataclass(frozen=True)
+class ReceiveResult:
+    paths: list[Path]
+
+
+ReceiveCallback = Callable[[ReceiveResult], None]
+
+
 class TransferServer:
-    def __init__(self, receive_dir: Path, port: int, host: str = "0.0.0.0") -> None:
+    def __init__(
+        self,
+        receive_dir: Path,
+        port: int,
+        host: str = "0.0.0.0",
+        on_received: ReceiveCallback | None = None,
+    ) -> None:
         self._receive_dir = receive_dir
         self._host = host
         self._port = port
+        self._on_received = on_received
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
@@ -99,7 +115,7 @@ class TransferServer:
                 send_json(client, {"type": TRANSFER_ACK_TYPE, "accepted": False})
                 return
 
-            plans = self._prepare_receive_plans(request.get("items"))
+            plans, root_paths = self._prepare_receive_plans(request.get("items"))
             send_json(
                 client,
                 {
@@ -116,6 +132,7 @@ class TransferServer:
                 frame = recv_json(client)
                 frame_type = frame.get("type")
                 if frame_type == TRANSFER_DONE_TYPE:
+                    self._notify_received(root_paths)
                     return
                 if frame_type == TRANSFER_DIR_TYPE:
                     destination = safe_destination_path(self._receive_dir, _relative_path(frame))
@@ -137,19 +154,31 @@ class TransferServer:
                     continue
                 raise ValueError("Unsupported transfer frame type.")
 
-    def _prepare_receive_plans(self, items: object) -> dict[str, ReceivePlan]:
+    def _prepare_receive_plans(self, items: object) -> tuple[dict[str, ReceivePlan], list[Path]]:
         if not isinstance(items, list):
             raise ValueError("Transfer request must contain an item list.")
         plans: dict[str, ReceivePlan] = {}
+        root_paths_by_name: dict[str, Path] = {}
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("Transfer manifest item must be an object.")
             relative_path = _relative_path(item)
             safe_destination_path(self._receive_dir, relative_path)
+            root_name = _root_name(relative_path)
             if item.get("is_dir") is True:
+                root_paths_by_name.setdefault(root_name, safe_destination_path(self._receive_dir, root_name))
                 continue
-            plans[relative_path] = _prepare_file_plan(self._receive_dir, item)
-        return plans
+            plan = _prepare_file_plan(self._receive_dir, item)
+            plans[relative_path] = plan
+            root_paths_by_name.setdefault(root_name, _root_destination(plan.destination, relative_path))
+        return plans, list(root_paths_by_name.values())
+
+    def _notify_received(self, paths: list[Path]) -> None:
+        if self._on_received is None or not paths:
+            return
+        existing_paths = [path for path in paths if path.exists()]
+        if existing_paths:
+            self._on_received(ReceiveResult(existing_paths))
 
 
 def _relative_path(frame: dict) -> str:
@@ -157,6 +186,17 @@ def _relative_path(frame: dict) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Transfer frame must contain a relative path.")
     return value
+
+
+def _root_name(relative_path: str) -> str:
+    return relative_path.split("/", 1)[0]
+
+
+def _root_destination(destination: Path, relative_path: str) -> Path:
+    depth = len(relative_path.split("/"))
+    if depth == 1:
+        return destination
+    return destination.parents[depth - 2]
 
 
 def _prepare_file_plan(receive_dir: Path, item: dict) -> ReceivePlan:

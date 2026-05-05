@@ -4,6 +4,8 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import subprocess
 
 from localnetftp.config import (
     AppConfig,
@@ -16,7 +18,7 @@ from localnetftp.config import (
 )
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
-from localnetftp.transfer import TransferProgress, TransferServer, send_paths
+from localnetftp.transfer import ReceiveResult, TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
 from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
@@ -55,7 +57,7 @@ def _dev_transfer_port(instance_name: str) -> int:
 
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
-    from PySide6.QtCore import QTimer, Qt
+    from PySide6.QtCore import QObject, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QKeySequence
     from PySide6.QtWidgets import (
         QApplication,
@@ -104,6 +106,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 event.accept()
                 return
             super().keyPressEvent(event)
+
+    class UiEvents(QObject):
+        received = Signal(object)
 
     class AppRuntime:
         def __init__(self) -> None:
@@ -168,7 +173,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             return self.start()
 
         def start_transfer_server(self) -> str:
-            self.transfer_server = TransferServer(self.config.receive_dir, self.options.transfer_port)
+            self.transfer_server = TransferServer(
+                self.config.receive_dir,
+                self.options.transfer_port,
+                on_received=self.on_received,
+            )
             try:
                 self.transfer_server.start()
             except OSError as exc:
@@ -213,6 +222,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def publish_local_peer(self) -> None:
             if self.local_peer_registry is not None:
                 self.local_peer_registry.publish(self.identity)
+
+        def on_received(self, result: ReceiveResult) -> None:
+            ui_events.received.emit(result)
 
         def start_share_server(self) -> DownloadShareServer:
             if self.share_server is None:
@@ -582,8 +594,30 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             QApplication.clipboard().setText(url)
             self.copy_status.setText("已复制")
 
+    def show_received_prompt(result: ReceiveResult) -> None:
+        paths = result.paths
+        if not paths:
+            return
+
+        message = QMessageBox()
+        message.setWindowTitle("收到文件")
+        message.setIcon(QMessageBox.Information)
+        message.setText(_received_message(paths))
+        open_folder_button = message.addButton("打开保存文件夹", QMessageBox.ActionRole)
+        open_item_button = message.addButton(_open_item_button_text(paths), QMessageBox.ActionRole)
+        message.addButton("关闭", QMessageBox.RejectRole)
+        message.exec()
+
+        clicked = message.clickedButton()
+        if clicked == open_folder_button:
+            _open_save_location(paths)
+        elif clicked == open_item_button:
+            _open_received_item(paths)
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    ui_events = UiEvents()
+    ui_events.received.connect(show_received_prompt)
 
     runtime = AppRuntime()
     startup_status = runtime.start()
@@ -676,6 +710,36 @@ def _share_executable_path() -> Path:
         if candidate.suffix.lower() == ".exe" and candidate.exists():
             return candidate
     return candidates[0]
+
+
+def _received_message(paths: list[Path]) -> str:
+    if len(paths) == 1:
+        return f"已保存：{paths[0].name}"
+    return f"已保存 {len(paths)} 个项目：\n" + "\n".join(path.name for path in paths[:8])
+
+
+def _open_item_button_text(paths: list[Path]) -> str:
+    if len(paths) == 1 and paths[0].is_dir():
+        return "打开文件夹"
+    if len(paths) == 1:
+        return "打开文件"
+    return "打开第一个项目"
+
+
+def _open_save_location(paths: list[Path]) -> None:
+    first_path = paths[0]
+    if first_path.is_file():
+        subprocess.Popen(["explorer", f"/select,{first_path}"])
+        return
+    _open_path(first_path.parent)
+
+
+def _open_received_item(paths: list[Path]) -> None:
+    _open_path(paths[0])
+
+
+def _open_path(path: Path) -> None:
+    os.startfile(path)  # type: ignore[attr-defined]
 
 
 def _app_stylesheet() -> str:
