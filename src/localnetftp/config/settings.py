@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import getpass
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,7 @@ CONFIG_FILE_NAME = "config.json"
 class AppConfig:
     receive_dir: Path
     start_on_boot: bool = False
+    device_name: str = ""
 
     def to_json_data(self) -> dict[str, Any]:
         data = asdict(self)
@@ -39,7 +41,19 @@ def default_config_path() -> Path:
 
 
 def default_config() -> AppConfig:
-    return AppConfig(receive_dir=default_download_dir())
+    return AppConfig(receive_dir=default_download_dir(), device_name=default_device_name())
+
+
+def default_device_name() -> str:
+    computer_name = os.environ.get("COMPUTERNAME")
+    if computer_name and computer_name.strip():
+        return computer_name.strip()
+
+    user_name = getpass.getuser()
+    if user_name and user_name.strip():
+        return f"{user_name.strip()} PC"
+
+    return "LocalNetFTP PC"
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -77,4 +91,16 @@ def _config_from_json_data(raw_data: object) -> AppConfig:
     if not isinstance(start_on_boot, bool):
         raise ValueError("Config field 'start_on_boot' must be a boolean.")
 
-    return AppConfig(receive_dir=receive_path, start_on_boot=start_on_boot)
+    device_name = raw_data.get("device_name")
+    if device_name is None:
+        display_name = default_device_name()
+    elif isinstance(device_name, str) and device_name.strip():
+        display_name = device_name.strip()
+    else:
+        raise ValueError("Config field 'device_name' must be a non-empty string.")
+
+    return AppConfig(
+        receive_dir=receive_path,
+        start_on_boot=start_on_boot,
+        device_name=display_name,
+    )

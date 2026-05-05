@@ -49,6 +49,10 @@ def run_tray_app() -> int:
             status = QLabel("拖入文件或文件夹后会显示在待发送列表。传输功能开发中。")
             status.setWordWrap(True)
 
+            device_label = QLabel("本机名称")
+            self.device_name = QLineEdit(self._config.device_name)
+            self.device_name.setPlaceholderText("例如：客厅电脑")
+
             receive_label = QLabel("接收目录")
             self.receive_dir = QLineEdit(str(self._config.receive_dir))
             browse_button = QPushButton("浏览")
@@ -84,6 +88,8 @@ def run_tray_app() -> int:
             layout.addWidget(title)
             layout.addWidget(status)
             layout.addSpacing(8)
+            layout.addWidget(device_label)
+            layout.addWidget(self.device_name)
             layout.addWidget(receive_label)
             layout.addLayout(receive_layout)
             layout.addWidget(self.start_on_boot)
@@ -147,7 +153,16 @@ def run_tray_app() -> int:
 
         def _save(self) -> None:
             receive_dir = Path(self.receive_dir.text()).expanduser()
-            config = AppConfig(receive_dir=receive_dir, start_on_boot=self.start_on_boot.isChecked())
+            device_name = self.device_name.text().strip()
+            if not device_name:
+                QMessageBox.warning(self, "LocalNetFTP", "本机名称不能为空。")
+                return
+
+            config = AppConfig(
+                receive_dir=receive_dir,
+                start_on_boot=self.start_on_boot.isChecked(),
+                device_name=device_name,
+            )
             save_config(config)
             set_start_on_boot(
                 config.start_on_boot,
