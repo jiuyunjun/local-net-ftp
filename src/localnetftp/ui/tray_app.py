@@ -12,6 +12,7 @@ from localnetftp.config import (
 )
 from localnetftp.network import DiscoveryService, create_device_identity
 from localnetftp.ui.drop_paths import append_unique_paths, local_paths_from_urls
+from localnetftp.ui.send_state import can_send, send_summary
 
 
 TRANSFER_LISTEN_PORT = 49200
@@ -47,6 +48,7 @@ def run_tray_app() -> int:
             self._config = load_config()
             save_config(self._config)
             self._pending_paths: list[Path] = []
+            self._peer_names_by_row: dict[int, str] = {}
             self._discovery_service: DiscoveryService | None = None
 
             title = QLabel("LocalNetFTP")
@@ -78,6 +80,7 @@ def run_tray_app() -> int:
             self.peer_list.setAlternatingRowColors(True)
             self.peer_list.setSelectionMode(QListWidget.ExtendedSelection)
             self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
+            self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
             pending_label = QLabel("待发送")
             self.pending_list = QListWidget()
@@ -88,12 +91,17 @@ def run_tray_app() -> int:
             clear_button = QPushButton("清空列表")
             clear_button.clicked.connect(self._clear_pending_paths)
 
+            self.send_button = QPushButton("发送")
+            self.send_button.clicked.connect(self._send_selected)
+            self.send_button.setEnabled(False)
+
             save_button = QPushButton("保存设置")
             save_button.clicked.connect(self._save)
 
             action_layout = QHBoxLayout()
             action_layout.addWidget(clear_button)
             action_layout.addStretch(1)
+            action_layout.addWidget(self.send_button)
             action_layout.addWidget(save_button)
 
             layout = QVBoxLayout(self)
@@ -170,6 +178,29 @@ def run_tray_app() -> int:
             for path in paths:
                 marker = "[文件夹]" if path.is_dir() else "[文件]"
                 self.pending_list.addItem(f"{marker} {path}")
+            self._update_send_button()
+
+        def _selected_peer_names(self) -> list[str]:
+            names: list[str] = []
+            for item in self.peer_list.selectedItems():
+                row = self.peer_list.row(item)
+                peer_name = self._peer_names_by_row.get(row)
+                if peer_name:
+                    names.append(peer_name)
+            return names
+
+        def _update_send_button(self) -> None:
+            self.send_button.setEnabled(can_send(len(self._selected_peer_names()), len(self._pending_paths)))
+
+        def _send_selected(self) -> None:
+            peer_names = self._selected_peer_names()
+            if not can_send(len(peer_names), len(self._pending_paths)):
+                return
+            QMessageBox.information(
+                self,
+                "LocalNetFTP",
+                send_summary(peer_names, self._pending_paths) + "\n\n真实传输功能将在下一步实现。",
+            )
 
         def _save(self) -> None:
             receive_dir = Path(self.receive_dir.text()).expanduser()
@@ -219,19 +250,27 @@ def run_tray_app() -> int:
                 self._discovery_service = None
 
         def _refresh_peers(self) -> None:
+            selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
+            self._peer_names_by_row = {}
             if self._discovery_service is None:
+                self._update_send_button()
                 return
 
             peers = self._discovery_service.peers()
             if not peers:
                 self.peer_list.addItem("暂无在线用户")
+                self._update_send_button()
                 return
 
             for peer in peers:
-                self.peer_list.addItem(
-                    f"{peer.identity.device_name}  {peer.address}:{peer.identity.listen_port}"
-                )
+                row = self.peer_list.count()
+                peer_name = peer.identity.device_name
+                self._peer_names_by_row[row] = peer_name
+                self.peer_list.addItem(f"{peer_name}  {peer.address}:{peer.identity.listen_port}")
+                if peer_name in selected_names:
+                    self.peer_list.item(row).setSelected(True)
+            self._update_send_button()
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if QSystemTrayIcon.isSystemTrayAvailable():
