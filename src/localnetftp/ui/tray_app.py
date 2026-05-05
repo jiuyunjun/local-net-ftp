@@ -13,8 +13,8 @@ from localnetftp.config import (
 )
 from localnetftp.network import DiscoveryService, create_device_identity
 from localnetftp.transfer import TransferServer, send_paths
-from localnetftp.ui.drop_paths import append_unique_paths, local_paths_from_urls
-from localnetftp.ui.send_state import can_send, send_summary
+from localnetftp.ui.drop_paths import local_paths_from_urls
+from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
 
 
 TRANSFER_LISTEN_PORT = 49200
@@ -108,21 +108,20 @@ def run_tray_app() -> int:
         def __init__(self, runtime: AppRuntime) -> None:
             super().__init__()
             self._runtime = runtime
-            self._pending_paths: list[Path] = []
             self._peers_by_row = {}
             self._active_send_count = 0
             self._send_failures: list[str] = []
             self._send_lock = threading.Lock()
 
             self.setWindowTitle("LocalNetFTP")
-            self.setMinimumSize(340, 360)
-            self.setMaximumWidth(420)
+            self.setMinimumSize(300, 260)
+            self.setMaximumWidth(360)
             self.setAcceptDrops(True)
             self.setWindowOpacity(0.92)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setWindowFlag(Qt.Tool, True)
 
-            self.status = QLabel("拖入文件，选择用户后发送。")
+            self.status = QLabel("选择用户后，把文件或文件夹拖到这里。")
             self.status.setWordWrap(True)
             self.status.setObjectName("floatingStatus")
 
@@ -134,34 +133,12 @@ def run_tray_app() -> int:
             self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
-            pending_label = QLabel("待发送")
-            pending_label.setObjectName("sectionLabel")
-            self.pending_list = QListWidget()
-            self.pending_list.setAlternatingRowColors(True)
-            self.pending_list.setSelectionMode(QListWidget.ExtendedSelection)
-            self.pending_list.setToolTip("把文件或文件夹拖到窗口中")
-
-            clear_button = QPushButton("清空列表")
-            clear_button.clicked.connect(self._clear_pending_paths)
-
-            self.send_button = QPushButton("发送")
-            self.send_button.clicked.connect(self._send_selected)
-            self.send_button.setEnabled(False)
-
-            action_layout = QHBoxLayout()
-            action_layout.addWidget(clear_button)
-            action_layout.addStretch(1)
-            action_layout.addWidget(self.send_button)
-
             layout = QVBoxLayout(self)
             layout.setContentsMargins(14, 12, 14, 12)
             layout.setSpacing(8)
             layout.addWidget(self.status)
             layout.addWidget(peers_label)
             layout.addWidget(self.peer_list, 1)
-            layout.addWidget(pending_label)
-            layout.addWidget(self.pending_list, 1)
-            layout.addLayout(action_layout)
 
             self.setStyleSheet(_floating_stylesheet())
 
@@ -182,21 +159,10 @@ def run_tray_app() -> int:
         def dropEvent(self, event) -> None:  # noqa: N802 - Qt method name
             paths = local_paths_from_urls(event.mimeData().urls())
             if paths:
-                self._set_pending_paths(append_unique_paths(self._pending_paths, paths))
+                self._confirm_and_send(paths)
                 event.acceptProposedAction()
             else:
                 event.ignore()
-
-        def _clear_pending_paths(self) -> None:
-            self._set_pending_paths([])
-
-        def _set_pending_paths(self, paths: list[Path]) -> None:
-            self._pending_paths = paths
-            self.pending_list.clear()
-            for path in paths:
-                marker = "[文件夹]" if path.is_dir() else "[文件]"
-                self.pending_list.addItem(f"{marker} {path}")
-            self._update_send_button()
 
         def _selected_peer_names(self) -> list[str]:
             return [peer.identity.device_name for peer in self._selected_peers()]
@@ -211,35 +177,50 @@ def run_tray_app() -> int:
             return peers
 
         def _update_send_button(self) -> None:
-            self.send_button.setEnabled(
-                self._active_send_count == 0
-                and can_send(len(self._selected_peer_names()), len(self._pending_paths))
-            )
+            if self._active_send_count:
+                self.status.setText("正在发送...")
+            elif self._selected_peers():
+                self.status.setText("把文件或文件夹拖到这里发送。")
+            else:
+                self.status.setText("选择用户后，把文件或文件夹拖到这里。")
 
-        def _send_selected(self) -> None:
+        def _confirm_and_send(self, paths: list[Path]) -> None:
             peers = self._selected_peers()
             peer_names = [peer.identity.device_name for peer in peers]
-            if not can_send(len(peers), len(self._pending_paths)):
+            if not can_send(len(peers), len(paths)):
+                QMessageBox.information(self, "LocalNetFTP", "请先选择要发送给谁。")
+                self._update_send_button()
+                return
+
+            result = QMessageBox.question(
+                self,
+                "确认发送",
+                confirmation_text(peer_names, paths),
+                QMessageBox.Ok | QMessageBox.Cancel,
+                QMessageBox.Ok,
+            )
+            if result != QMessageBox.Ok:
+                self._update_send_button()
                 return
 
             with self._send_lock:
                 self._active_send_count = len(peers)
                 self._send_failures = []
 
-            self.status.setText(send_summary(peer_names, self._pending_paths))
+            self.status.setText(send_summary(peer_names, paths))
             self._update_send_button()
             for peer in peers:
                 threading.Thread(
                     target=self._send_to_peer,
-                    args=(peer,),
+                    args=(peer, list(paths)),
                     name=f"LocalNetFTPSend-{peer.identity.device_id}",
                     daemon=True,
                 ).start()
 
-        def _send_to_peer(self, peer) -> None:
+        def _send_to_peer(self, peer, paths: list[Path]) -> None:
             failed = False
             try:
-                send_paths(peer.address, peer.identity.listen_port, list(self._pending_paths))
+                send_paths(peer.address, peer.identity.listen_port, paths)
             except Exception as exc:
                 failed = True
                 print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
@@ -468,7 +449,7 @@ def _floating_stylesheet() -> str:
         padding-top: 2px;
     }
     QListWidget {
-        min-height: 96px;
+        min-height: 180px;
         border: 1px solid rgba(132, 146, 166, 150);
         background-color: rgba(255, 255, 255, 225);
         alternate-background-color: rgba(240, 244, 248, 215);
