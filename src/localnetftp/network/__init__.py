@@ -10,8 +10,10 @@ from localnetftp.network.discovery import (
     create_device_identity,
     decode_hello,
     encode_hello,
+    safe_device_id,
 )
 from localnetftp.network.discovery_service import DiscoveryService
+from localnetftp.network.local_peers import LocalPeerRegistry
 
 __all__ = [
     "DISCOVERY_MESSAGE_TYPE",
@@ -24,4 +26,6 @@ __all__ = [
     "create_device_identity",
     "decode_hello",
     "encode_hello",
+    "safe_device_id",
+    "LocalPeerRegistry",
 ]

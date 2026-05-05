@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 from localnetftp.config import (
     AppConfig,
+    CONFIG_FILE_NAME,
     default_config_dir,
     is_start_on_boot_enabled,
     load_config,
     save_config,
     set_start_on_boot,
 )
-from localnetftp.network import DiscoveryService, create_device_identity
+from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
 from localnetftp.transfer import TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
@@ -21,9 +23,38 @@ from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
 
 
 TRANSFER_LISTEN_PORT = 49200
+DEV_TRANSFER_BASE_PORT = 49210
 
 
-def run_tray_app() -> int:
+@dataclass(frozen=True)
+class RuntimeOptions:
+    config_path: Path | None = None
+    config_dir: Path | None = None
+    transfer_port: int = TRANSFER_LISTEN_PORT
+    dev_instance: str = ""
+    dev_registry_path: Path | None = None
+
+
+def dev_runtime_options(instance_name: str) -> RuntimeOptions:
+    normalized = instance_name.strip() or "A"
+    config_dir = default_config_dir() / "dev" / normalized
+    return RuntimeOptions(
+        config_path=config_dir / CONFIG_FILE_NAME,
+        config_dir=config_dir,
+        transfer_port=_dev_transfer_port(normalized),
+        dev_instance=normalized,
+        dev_registry_path=default_config_dir() / "dev" / "peers.json",
+    )
+
+
+def _dev_transfer_port(instance_name: str) -> int:
+    normalized = instance_name.strip().upper()
+    if len(normalized) == 1 and "A" <= normalized <= "Z":
+        return DEV_TRANSFER_BASE_PORT + ord(normalized) - ord("A")
+    return DEV_TRANSFER_BASE_PORT + sum(ord(char) for char in normalized) % 1000
+
+
+def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtCore import QTimer, Qt
     from PySide6.QtGui import QAction, QKeySequence
     from PySide6.QtWidgets import (
@@ -44,6 +75,7 @@ def run_tray_app() -> int:
     )
 
     SHARE_PORT = 49300
+    runtime_options = options or RuntimeOptions()
 
     class NameEdit(QLineEdit):
         def __init__(self, text: str) -> None:
@@ -75,11 +107,35 @@ def run_tray_app() -> int:
 
     class AppRuntime:
         def __init__(self) -> None:
-            self.config = load_config()
-            save_config(self.config)
+            self.options = runtime_options
+            self.config_path = runtime_options.config_path
+            self.config_dir = runtime_options.config_dir or default_config_dir()
+            self.config = self._load_initial_config()
             self.discovery_service: DiscoveryService | None = None
             self.transfer_server: TransferServer | None = None
             self.share_server: DownloadShareServer | None = None
+            self.local_peer_registry = (
+                LocalPeerRegistry(runtime_options.dev_registry_path)
+                if runtime_options.dev_registry_path is not None
+                else None
+            )
+            self.identity = create_device_identity(
+                self.config.device_name,
+                listen_port=runtime_options.transfer_port,
+                device_id=self.config.device_id,
+            )
+            save_config(self.config, self.config_path)
+
+        def _load_initial_config(self) -> AppConfig:
+            if self.options.dev_instance and self.config_path is not None and not self.config_path.exists():
+                config = AppConfig(
+                    receive_dir=self.config_dir / "Downloads",
+                    device_name=f"LocalNetFTP {self.options.dev_instance}",
+                    device_id=f"localnetftp-dev-{self.options.dev_instance}",
+                )
+                save_config(config, self.config_path)
+                return config
+            return load_config(self.config_path)
 
         def start(self) -> str:
             transfer_error = self.start_transfer_server()
@@ -96,8 +152,13 @@ def run_tray_app() -> int:
             self.stop_share_server()
 
         def save_settings(self, config: AppConfig) -> str:
-            save_config(config)
+            save_config(config, self.config_path)
             self.config = config
+            self.identity = create_device_identity(
+                self.config.device_name,
+                listen_port=self.options.transfer_port,
+                device_id=self.config.device_id,
+            )
             set_start_on_boot(
                 config.start_on_boot,
                 _current_executable(),
@@ -107,7 +168,7 @@ def run_tray_app() -> int:
             return self.start()
 
         def start_transfer_server(self) -> str:
-            self.transfer_server = TransferServer(self.config.receive_dir, TRANSFER_LISTEN_PORT)
+            self.transfer_server = TransferServer(self.config.receive_dir, self.options.transfer_port)
             try:
                 self.transfer_server.start()
             except OSError as exc:
@@ -121,23 +182,37 @@ def run_tray_app() -> int:
                 self.transfer_server = None
 
         def start_discovery(self) -> str:
-            identity = create_device_identity(
-                self.config.device_name,
-                listen_port=TRANSFER_LISTEN_PORT,
-                device_id=self.config.device_id,
-            )
-            self.discovery_service = DiscoveryService(identity)
+            self.discovery_service = DiscoveryService(self.identity)
             try:
                 self.discovery_service.start()
             except OSError as exc:
                 self.discovery_service = None
                 return f"局域网发现启动失败：{exc}"
+            self.publish_local_peer()
             return ""
 
         def stop_discovery(self) -> None:
+            if self.local_peer_registry is not None:
+                self.local_peer_registry.remove(self.config.device_id)
             if self.discovery_service is not None:
                 self.discovery_service.stop()
                 self.discovery_service = None
+
+        def peers(self) -> list[Peer]:
+            peers: list[Peer] = []
+            if self.discovery_service is not None:
+                peers.extend(self.discovery_service.peers())
+            if self.local_peer_registry is not None:
+                self.publish_local_peer()
+                by_device_id = {peer.identity.device_id: peer for peer in peers}
+                for peer in self.local_peer_registry.peers(self.config.device_id):
+                    by_device_id[peer.identity.device_id] = peer
+                peers = sorted(by_device_id.values(), key=lambda peer: peer.identity.device_name.casefold())
+            return peers
+
+        def publish_local_peer(self) -> None:
+            if self.local_peer_registry is not None:
+                self.local_peer_registry.publish(self.identity)
 
         def start_share_server(self) -> DownloadShareServer:
             if self.share_server is None:
@@ -267,7 +342,7 @@ def run_tray_app() -> int:
             if mime_data.hasUrls():
                 return local_paths_from_urls(mime_data.urls())
 
-            clipboard_dir = default_config_dir() / "clipboard"
+            clipboard_dir = self._runtime.config_dir / "clipboard"
             clipboard_dir.mkdir(parents=True, exist_ok=True)
 
             if mime_data.hasImage():
@@ -388,12 +463,7 @@ def run_tray_app() -> int:
             self.peer_list.clear()
             self._peers_by_row = {}
 
-            discovery_service = self._runtime.discovery_service
-            if discovery_service is None:
-                self._update_send_button()
-                return
-
-            peers = discovery_service.peers()
+            peers = self._runtime.peers()
             if not peers:
                 self.peer_list.addItem("暂无在线用户")
                 self._update_send_button()

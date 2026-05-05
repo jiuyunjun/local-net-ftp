@@ -35,11 +35,18 @@ def create_device_identity(device_name: str, listen_port: int, device_id: str | 
         raise ValueError("Listen port must be between 1 and 65535.")
 
     return DeviceIdentity(
-        device_id=device_id or str(uuid.uuid4()),
+        device_id=safe_device_id(device_id) if device_id is not None else str(uuid.uuid4()),
         device_name=normalized_name,
         host_name=socket.gethostname(),
         listen_port=listen_port,
     )
+
+
+def safe_device_id(device_id: str) -> str:
+    normalized = device_id.strip()
+    if not normalized:
+        raise ValueError("Device id must not be empty.")
+    return normalized
 
 
 def encode_hello(identity: DeviceIdentity) -> bytes:
