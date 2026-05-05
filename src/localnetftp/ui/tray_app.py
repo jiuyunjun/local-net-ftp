@@ -22,7 +22,7 @@ TRANSFER_LISTEN_PORT = 49200
 
 def run_tray_app() -> int:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtGui import QAction, QIcon
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -40,46 +40,90 @@ def run_tray_app() -> int:
         QWidget,
     )
 
-    class FloatingWindow(QWidget):
+    class AppRuntime:
         def __init__(self) -> None:
-            super().__init__()
-            self.setWindowTitle("LocalNetFTP")
-            self.setMinimumSize(520, 360)
-            self.setAcceptDrops(True)
+            self.config = load_config()
+            save_config(self.config)
+            self.discovery_service: DiscoveryService | None = None
+            self.transfer_server: TransferServer | None = None
 
-            self._config = load_config()
-            save_config(self._config)
+        def start(self) -> str:
+            transfer_error = self.start_transfer_server()
+            discovery_error = self.start_discovery()
+            if transfer_error:
+                return transfer_error
+            if discovery_error:
+                return discovery_error
+            return "正在发现局域网用户。拖入文件或文件夹后可发送。"
+
+        def stop(self) -> None:
+            self.stop_discovery()
+            self.stop_transfer_server()
+
+        def save_settings(self, config: AppConfig) -> str:
+            save_config(config)
+            self.config = config
+            set_start_on_boot(
+                config.start_on_boot,
+                _current_executable(),
+                app_name="LocalNetFTP",
+            )
+            self.stop()
+            return self.start()
+
+        def start_transfer_server(self) -> str:
+            self.transfer_server = TransferServer(self.config.receive_dir, TRANSFER_LISTEN_PORT)
+            try:
+                self.transfer_server.start()
+            except OSError as exc:
+                self.transfer_server = None
+                return f"文件接收服务启动失败：{exc}"
+            return ""
+
+        def stop_transfer_server(self) -> None:
+            if self.transfer_server is not None:
+                self.transfer_server.stop()
+                self.transfer_server = None
+
+        def start_discovery(self) -> str:
+            identity = create_device_identity(
+                self.config.device_name,
+                listen_port=TRANSFER_LISTEN_PORT,
+                device_id=self.config.device_id,
+            )
+            self.discovery_service = DiscoveryService(identity)
+            try:
+                self.discovery_service.start()
+            except OSError as exc:
+                self.discovery_service = None
+                return f"局域网发现启动失败：{exc}"
+            return ""
+
+        def stop_discovery(self) -> None:
+            if self.discovery_service is not None:
+                self.discovery_service.stop()
+                self.discovery_service = None
+
+    class FloatingWindow(QWidget):
+        def __init__(self, runtime: AppRuntime) -> None:
+            super().__init__()
+            self._runtime = runtime
             self._pending_paths: list[Path] = []
             self._peers_by_row = {}
-            self._discovery_service: DiscoveryService | None = None
-            self._transfer_server: TransferServer | None = None
             self._active_send_count = 0
             self._send_failures: list[str] = []
             self._send_lock = threading.Lock()
+
+            self.setWindowTitle("LocalNetFTP")
+            self.setMinimumSize(460, 420)
+            self.setAcceptDrops(True)
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
 
             title = QLabel("LocalNetFTP")
             title.setObjectName("titleLabel")
 
             self.status = QLabel("正在启动局域网发现和文件接收服务。")
             self.status.setWordWrap(True)
-
-            device_label = QLabel("本机名称")
-            self.device_name = QLineEdit(self._config.device_name)
-            self.device_name.setPlaceholderText("例如：客厅电脑")
-
-            receive_label = QLabel("接收目录")
-            self.receive_dir = QLineEdit(str(self._config.receive_dir))
-            browse_button = QPushButton("浏览")
-            browse_button.clicked.connect(self._choose_receive_dir)
-
-            receive_layout = QHBoxLayout()
-            receive_layout.addWidget(self.receive_dir, 1)
-            receive_layout.addWidget(browse_button)
-
-            self.start_on_boot = QCheckBox("开机自动启动")
-            self.start_on_boot.setChecked(
-                is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
-            )
 
             peers_label = QLabel("在线用户")
             self.peer_list = QListWidget()
@@ -101,24 +145,14 @@ def run_tray_app() -> int:
             self.send_button.clicked.connect(self._send_selected)
             self.send_button.setEnabled(False)
 
-            save_button = QPushButton("保存设置")
-            save_button.clicked.connect(self._save)
-
             action_layout = QHBoxLayout()
             action_layout.addWidget(clear_button)
             action_layout.addStretch(1)
             action_layout.addWidget(self.send_button)
-            action_layout.addWidget(save_button)
 
             layout = QVBoxLayout(self)
             layout.addWidget(title)
             layout.addWidget(self.status)
-            layout.addSpacing(8)
-            layout.addWidget(device_label)
-            layout.addWidget(self.device_name)
-            layout.addWidget(receive_label)
-            layout.addLayout(receive_layout)
-            layout.addWidget(self.start_on_boot)
             layout.addSpacing(8)
             layout.addWidget(peers_label)
             layout.addWidget(self.peer_list, 1)
@@ -127,35 +161,15 @@ def run_tray_app() -> int:
             layout.addWidget(self.pending_list, 1)
             layout.addLayout(action_layout)
 
-            self.setStyleSheet(
-                """
-                QWidget {
-                    font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-                    font-size: 13px;
-                }
-                QLabel#titleLabel {
-                    font-size: 22px;
-                    font-weight: 600;
-                }
-                QLineEdit {
-                    min-height: 28px;
-                    padding: 3px 6px;
-                }
-                QListWidget {
-                    min-height: 120px;
-                }
-                QPushButton {
-                    min-height: 30px;
-                    padding: 3px 14px;
-                }
-                """
-            )
+            self.setStyleSheet(_app_stylesheet())
+
             self._peer_refresh_timer = QTimer(self)
             self._peer_refresh_timer.setInterval(1000)
             self._peer_refresh_timer.timeout.connect(self._refresh_peers)
             self._peer_refresh_timer.start()
-            self._start_transfer_server()
-            self._start_discovery()
+
+        def set_status(self, text: str) -> None:
+            self.status.setText(text)
 
         def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.mimeData().hasUrls():
@@ -170,11 +184,6 @@ def run_tray_app() -> int:
                 event.acceptProposedAction()
             else:
                 event.ignore()
-
-        def _choose_receive_dir(self) -> None:
-            selected = QFileDialog.getExistingDirectory(self, "选择接收目录", self.receive_dir.text())
-            if selected:
-                self.receive_dir.setText(selected)
 
         def _clear_pending_paths(self) -> None:
             self._set_pending_paths([])
@@ -210,9 +219,11 @@ def run_tray_app() -> int:
             peer_names = [peer.identity.device_name for peer in peers]
             if not can_send(len(peers), len(self._pending_paths)):
                 return
+
             with self._send_lock:
                 self._active_send_count = len(peers)
                 self._send_failures = []
+
             self.status.setText(send_summary(peer_names, self._pending_paths))
             self._update_send_button()
             for peer in peers:
@@ -252,80 +263,17 @@ def run_tray_app() -> int:
                 self.status.setText("发送完成。")
             self._update_send_button()
 
-        def _save(self) -> None:
-            receive_dir = Path(self.receive_dir.text()).expanduser()
-            device_name = self.device_name.text().strip()
-            if not device_name:
-                QMessageBox.warning(self, "LocalNetFTP", "本机名称不能为空。")
-                return
-
-            config = AppConfig(
-                receive_dir=receive_dir,
-                start_on_boot=self.start_on_boot.isChecked(),
-                device_name=device_name,
-                device_id=self._config.device_id,
-            )
-            save_config(config)
-            self._config = config
-            set_start_on_boot(
-                config.start_on_boot,
-                _current_executable(),
-                app_name="LocalNetFTP",
-            )
-            self._restart_transfer_server()
-            self._restart_discovery()
-            QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
-
-        def _start_transfer_server(self) -> None:
-            self._transfer_server = TransferServer(self._config.receive_dir, TRANSFER_LISTEN_PORT)
-            try:
-                self._transfer_server.start()
-            except OSError as exc:
-                self._transfer_server = None
-                self.status.setText(f"文件接收服务启动失败：{exc}")
-
-        def _restart_transfer_server(self) -> None:
-            self._stop_transfer_server()
-            self._start_transfer_server()
-
-        def _stop_transfer_server(self) -> None:
-            if self._transfer_server is not None:
-                self._transfer_server.stop()
-                self._transfer_server = None
-
-        def _start_discovery(self) -> None:
-            identity = create_device_identity(
-                self._config.device_name,
-                listen_port=TRANSFER_LISTEN_PORT,
-                device_id=self._config.device_id,
-            )
-            self._discovery_service = DiscoveryService(identity)
-            try:
-                self._discovery_service.start()
-            except OSError as exc:
-                self._discovery_service = None
-                self.status.setText(f"局域网发现启动失败：{exc}")
-                return
-            self.status.setText("正在发现局域网用户。拖入文件或文件夹后会显示在待发送列表。")
-
-        def _restart_discovery(self) -> None:
-            self._stop_discovery()
-            self._start_discovery()
-
-        def _stop_discovery(self) -> None:
-            if self._discovery_service is not None:
-                self._discovery_service.stop()
-                self._discovery_service = None
-
         def _refresh_peers(self) -> None:
             selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
             self._peers_by_row = {}
-            if self._discovery_service is None:
+
+            discovery_service = self._runtime.discovery_service
+            if discovery_service is None:
                 self._update_send_button()
                 return
 
-            peers = self._discovery_service.peers()
+            peers = discovery_service.peers()
             if not peers:
                 self.peer_list.addItem("暂无在线用户")
                 self._update_send_button()
@@ -341,50 +289,125 @@ def run_tray_app() -> int:
             self._update_send_button()
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
-            if QSystemTrayIcon.isSystemTrayAvailable():
-                event.ignore()
-                self.hide()
-            else:
-                event.accept()
+            event.ignore()
+            self.hide()
+
+    class SettingsWindow(QWidget):
+        def __init__(self, runtime: AppRuntime, on_saved) -> None:
+            super().__init__()
+            self._runtime = runtime
+            self._on_saved = on_saved
+
+            self.setWindowTitle("LocalNetFTP 设置")
+            self.setMinimumSize(520, 180)
+
+            device_label = QLabel("本机名称")
+            self.device_name = QLineEdit()
+            self.device_name.setPlaceholderText("例如：客厅电脑")
+
+            receive_label = QLabel("接收目录")
+            self.receive_dir = QLineEdit()
+            browse_button = QPushButton("浏览")
+            browse_button.clicked.connect(self._choose_receive_dir)
+
+            receive_layout = QHBoxLayout()
+            receive_layout.addWidget(self.receive_dir, 1)
+            receive_layout.addWidget(browse_button)
+
+            self.start_on_boot = QCheckBox("开机自动启动")
+
+            save_button = QPushButton("保存设置")
+            save_button.clicked.connect(self._save)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(device_label)
+            layout.addWidget(self.device_name)
+            layout.addWidget(receive_label)
+            layout.addLayout(receive_layout)
+            layout.addWidget(self.start_on_boot)
+            layout.addStretch(1)
+            layout.addWidget(save_button, alignment=Qt.AlignRight)
+
+            self.setStyleSheet(_app_stylesheet())
+            self.reload()
+
+        def reload(self) -> None:
+            config = self._runtime.config
+            self.device_name.setText(config.device_name)
+            self.receive_dir.setText(str(config.receive_dir))
+            self.start_on_boot.setChecked(
+                is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
+            )
+
+        def _choose_receive_dir(self) -> None:
+            selected = QFileDialog.getExistingDirectory(self, "选择接收目录", self.receive_dir.text())
+            if selected:
+                self.receive_dir.setText(selected)
+
+        def _save(self) -> None:
+            receive_dir = Path(self.receive_dir.text()).expanduser()
+            device_name = self.device_name.text().strip()
+            if not device_name:
+                QMessageBox.warning(self, "LocalNetFTP", "本机名称不能为空。")
+                return
+
+            config = AppConfig(
+                receive_dir=receive_dir,
+                start_on_boot=self.start_on_boot.isChecked(),
+                device_name=device_name,
+                device_id=self._runtime.config.device_id,
+            )
+            status = self._runtime.save_settings(config)
+            self._on_saved(status)
+            QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
-    window = FloatingWindow()
+    runtime = AppRuntime()
+    startup_status = runtime.start()
+
+    floating_window = FloatingWindow(runtime)
+    floating_window.set_status(startup_status)
+
+    settings_window = SettingsWindow(runtime, floating_window.set_status)
+
     icon = app.style().standardIcon(QStyle.SP_DriveNetIcon)
-    window.setWindowIcon(icon)
+    floating_window.setWindowIcon(icon)
+    settings_window.setWindowIcon(icon)
 
     tray = QSystemTrayIcon(icon, app)
     tray.setToolTip("LocalNetFTP")
 
     menu = QMenu()
-    show_action = QAction("显示", menu)
+    settings_action = QAction("设置", menu)
     quit_action = QAction("退出", menu)
-    menu.addAction(show_action)
+    menu.addAction(settings_action)
     menu.addSeparator()
     menu.addAction(quit_action)
     tray.setContextMenu(menu)
 
-    def show_window() -> None:
-        window.show()
-        window.raise_()
-        window.activateWindow()
+    def show_floating_window() -> None:
+        floating_window.show()
+        floating_window.raise_()
+        floating_window.activateWindow()
 
-    show_action.triggered.connect(show_window)
+    def show_settings_window() -> None:
+        settings_window.reload()
+        settings_window.show()
+        settings_window.raise_()
+        settings_window.activateWindow()
+
+    settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)
 
     def on_tray_activated(reason: QSystemTrayIcon.ActivationReason) -> None:
-        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
-            if window.isVisible():
-                window.hide()
-            else:
-                show_window()
+        if reason == QSystemTrayIcon.Trigger:
+            show_floating_window()
 
     tray.activated.connect(on_tray_activated)
     tray.show()
-    app.aboutToQuit.connect(window._stop_discovery)
-    app.aboutToQuit.connect(window._stop_transfer_server)
-    show_window()
+    app.aboutToQuit.connect(runtime.stop)
 
     return app.exec()
 
@@ -393,3 +416,27 @@ def _current_executable() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable)
     return Path(sys.argv[0]).resolve()
+
+
+def _app_stylesheet() -> str:
+    return """
+    QWidget {
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        font-size: 13px;
+    }
+    QLabel#titleLabel {
+        font-size: 22px;
+        font-weight: 600;
+    }
+    QLineEdit {
+        min-height: 28px;
+        padding: 3px 6px;
+    }
+    QListWidget {
+        min-height: 120px;
+    }
+    QPushButton {
+        min-height: 30px;
+        padding: 3px 14px;
+    }
+    """
