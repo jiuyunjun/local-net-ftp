@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 from localnetftp.config import (
@@ -11,6 +12,7 @@ from localnetftp.config import (
     set_start_on_boot,
 )
 from localnetftp.network import DiscoveryService, create_device_identity
+from localnetftp.transfer import TransferServer, send_paths
 from localnetftp.ui.drop_paths import append_unique_paths, local_paths_from_urls
 from localnetftp.ui.send_state import can_send, send_summary
 
@@ -48,13 +50,17 @@ def run_tray_app() -> int:
             self._config = load_config()
             save_config(self._config)
             self._pending_paths: list[Path] = []
-            self._peer_names_by_row: dict[int, str] = {}
+            self._peers_by_row = {}
             self._discovery_service: DiscoveryService | None = None
+            self._transfer_server: TransferServer | None = None
+            self._active_send_count = 0
+            self._send_failures: list[str] = []
+            self._send_lock = threading.Lock()
 
             title = QLabel("LocalNetFTP")
             title.setObjectName("titleLabel")
 
-            self.status = QLabel("拖入文件或文件夹后会显示在待发送列表。传输功能开发中。")
+            self.status = QLabel("正在启动局域网发现和文件接收服务。")
             self.status.setWordWrap(True)
 
             device_label = QLabel("本机名称")
@@ -148,6 +154,7 @@ def run_tray_app() -> int:
             self._peer_refresh_timer.setInterval(1000)
             self._peer_refresh_timer.timeout.connect(self._refresh_peers)
             self._peer_refresh_timer.start()
+            self._start_transfer_server()
             self._start_discovery()
 
         def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
@@ -181,26 +188,69 @@ def run_tray_app() -> int:
             self._update_send_button()
 
         def _selected_peer_names(self) -> list[str]:
-            names: list[str] = []
+            return [peer.identity.device_name for peer in self._selected_peers()]
+
+        def _selected_peers(self):
+            peers = []
             for item in self.peer_list.selectedItems():
                 row = self.peer_list.row(item)
-                peer_name = self._peer_names_by_row.get(row)
-                if peer_name:
-                    names.append(peer_name)
-            return names
+                peer = self._peers_by_row.get(row)
+                if peer is not None:
+                    peers.append(peer)
+            return peers
 
         def _update_send_button(self) -> None:
-            self.send_button.setEnabled(can_send(len(self._selected_peer_names()), len(self._pending_paths)))
+            self.send_button.setEnabled(
+                self._active_send_count == 0
+                and can_send(len(self._selected_peer_names()), len(self._pending_paths))
+            )
 
         def _send_selected(self) -> None:
-            peer_names = self._selected_peer_names()
-            if not can_send(len(peer_names), len(self._pending_paths)):
+            peers = self._selected_peers()
+            peer_names = [peer.identity.device_name for peer in peers]
+            if not can_send(len(peers), len(self._pending_paths)):
                 return
-            QMessageBox.information(
-                self,
-                "LocalNetFTP",
-                send_summary(peer_names, self._pending_paths) + "\n\n真实传输功能将在下一步实现。",
-            )
+            with self._send_lock:
+                self._active_send_count = len(peers)
+                self._send_failures = []
+            self.status.setText(send_summary(peer_names, self._pending_paths))
+            self._update_send_button()
+            for peer in peers:
+                threading.Thread(
+                    target=self._send_to_peer,
+                    args=(peer,),
+                    name=f"LocalNetFTPSend-{peer.identity.device_id}",
+                    daemon=True,
+                ).start()
+
+        def _send_to_peer(self, peer) -> None:
+            failed = False
+            try:
+                send_paths(peer.address, peer.identity.listen_port, list(self._pending_paths))
+            except Exception as exc:
+                failed = True
+                print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
+                with self._send_lock:
+                    self._send_failures.append(peer.identity.device_name)
+            finally:
+                QTimer.singleShot(0, lambda: self._send_finished(peer.identity.device_name, failed))
+
+        def _send_finished(self, peer_name: str, failed: bool) -> None:
+            with self._send_lock:
+                self._active_send_count = max(0, self._active_send_count - 1)
+                active_send_count = self._active_send_count
+                failures = list(self._send_failures)
+
+            if active_send_count:
+                return
+
+            if failures:
+                self.status.setText(f"发送完成，失败：{'、'.join(failures)}")
+            elif failed:
+                self.status.setText(f"发送到 {peer_name} 失败。")
+            else:
+                self.status.setText("发送完成。")
+            self._update_send_button()
 
         def _save(self) -> None:
             receive_dir = Path(self.receive_dir.text()).expanduser()
@@ -222,8 +272,26 @@ def run_tray_app() -> int:
                 _current_executable(),
                 app_name="LocalNetFTP",
             )
+            self._restart_transfer_server()
             self._restart_discovery()
             QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
+
+        def _start_transfer_server(self) -> None:
+            self._transfer_server = TransferServer(self._config.receive_dir, TRANSFER_LISTEN_PORT)
+            try:
+                self._transfer_server.start()
+            except OSError as exc:
+                self._transfer_server = None
+                self.status.setText(f"文件接收服务启动失败：{exc}")
+
+        def _restart_transfer_server(self) -> None:
+            self._stop_transfer_server()
+            self._start_transfer_server()
+
+        def _stop_transfer_server(self) -> None:
+            if self._transfer_server is not None:
+                self._transfer_server.stop()
+                self._transfer_server = None
 
         def _start_discovery(self) -> None:
             identity = create_device_identity(
@@ -252,7 +320,7 @@ def run_tray_app() -> int:
         def _refresh_peers(self) -> None:
             selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
-            self._peer_names_by_row = {}
+            self._peers_by_row = {}
             if self._discovery_service is None:
                 self._update_send_button()
                 return
@@ -266,7 +334,7 @@ def run_tray_app() -> int:
             for peer in peers:
                 row = self.peer_list.count()
                 peer_name = peer.identity.device_name
-                self._peer_names_by_row[row] = peer_name
+                self._peers_by_row[row] = peer
                 self.peer_list.addItem(f"{peer_name}  {peer.address}:{peer.identity.listen_port}")
                 if peer_name in selected_names:
                     self.peer_list.item(row).setSelected(True)
@@ -315,6 +383,7 @@ def run_tray_app() -> int:
     tray.activated.connect(on_tray_activated)
     tray.show()
     app.aboutToQuit.connect(window._stop_discovery)
+    app.aboutToQuit.connect(window._stop_transfer_server)
     show_window()
 
     return app.exec()
