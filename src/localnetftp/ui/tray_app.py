@@ -465,9 +465,11 @@ def run_tray_app() -> int:
 
             self.url_list = QListWidget()
             self.url_list.itemClicked.connect(self._copy_item)
+            self.copy_status = QLabel("")
 
             layout = QVBoxLayout(self)
             layout.addWidget(self.url_list)
+            layout.addWidget(self.copy_status)
             self.setStyleSheet(_app_stylesheet())
 
         def set_urls(self, urls: list[ShareAddress]) -> None:
@@ -484,7 +486,7 @@ def run_tray_app() -> int:
                 return
             url = text[text.index("http://") :]
             QApplication.clipboard().setText(url)
-            QMessageBox.information(self, "LocalNetFTP", "已复制下载地址。")
+            self.copy_status.setText("已复制")
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)

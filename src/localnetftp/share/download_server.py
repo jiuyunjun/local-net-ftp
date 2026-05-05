@@ -179,6 +179,7 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
             text=True,
             encoding="gbk",
             errors="ignore",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.CalledProcessError):
         return []
@@ -190,7 +191,7 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
         if not line:
             continue
         if raw_line and not raw_line.startswith(" ") and line.endswith(":"):
-            current_name = line.rstrip(":")
+            current_name = _normalize_interface_name(line.rstrip(":"))
             continue
         if "IPv4" not in line:
             continue
@@ -200,3 +201,20 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
             interfaces.append((current_name or "局域网", address))
 
     return interfaces
+
+
+def _normalize_interface_name(name: str) -> str:
+    ethernet_prefix = "Ethernet adapter "
+    if name.startswith(ethernet_prefix):
+        suffix = name[len(ethernet_prefix) :].strip()
+        if suffix.startswith("???"):
+            suffix = suffix.replace("???", "", 1).strip()
+            return f"以太网 {suffix}".strip()
+        return f"以太网 {suffix}".strip()
+
+    wireless_prefix = "Wireless LAN adapter "
+    if name.startswith(wireless_prefix):
+        suffix = name[len(wireless_prefix) :].strip()
+        return f"无线网络 {suffix}".strip()
+
+    return name

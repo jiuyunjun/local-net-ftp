@@ -1,4 +1,4 @@
-from localnetftp.share.download_server import lan_download_urls
+from localnetftp.share.download_server import _normalize_interface_name, lan_download_urls
 from localnetftp.share import DownloadShareServer
 import socket
 import urllib.request
@@ -27,6 +27,11 @@ def test_download_share_server_serves_html_button_and_file(tmp_path):
 
     assert "下载 Windows 版" in html
     assert data == b"MZtest"
+
+
+def test_normalize_interface_name_repairs_ethernet_question_marks():
+    assert _normalize_interface_name("Ethernet adapter ??? 7") == "以太网 7"
+    assert _normalize_interface_name("Ethernet adapter Ethernet 2") == "以太网 Ethernet 2"
 
 
 def _free_port() -> int:
