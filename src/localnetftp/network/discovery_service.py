@@ -87,17 +87,18 @@ class DiscoveryService:
         return sock
 
     def _run(self) -> None:
-        assert self._socket is not None
+        sock = self._socket
+        assert sock is not None
         next_broadcast = 0.0
 
         while not self._stop_event.is_set():
             now = self._clock()
             if now >= next_broadcast:
-                self._send_hello(self._socket)
+                self._send_hello(sock)
                 next_broadcast = now + self._broadcast_interval
 
             try:
-                data, sender = self._socket.recvfrom(65535)
+                data, sender = sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
