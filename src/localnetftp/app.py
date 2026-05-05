@@ -1,12 +1,7 @@
 from __future__ import annotations
 
+from localnetftp.ui.tray_app import run_tray_app
+
 
 def main() -> int:
-    """Run the application entry point.
-
-    The real tray UI is intentionally not stubbed as a fake implementation.
-    It will be added with the first UI milestone.
-    """
-
-    print("LocalNetFTP scaffold is ready. Tray UI is not implemented yet.")
-    return 0
+    return run_tray_app()

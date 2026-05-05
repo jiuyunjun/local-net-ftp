@@ -1,6 +1,7 @@
-from localnetftp.app import main
+import localnetftp.app
 
 
-def test_main_returns_success(capsys):
-    assert main() == 0
-    assert "scaffold is ready" in capsys.readouterr().out
+def test_main_runs_tray_app(monkeypatch):
+    monkeypatch.setattr(localnetftp.app, "run_tray_app", lambda: 0)
+
+    assert localnetftp.app.main() == 0
