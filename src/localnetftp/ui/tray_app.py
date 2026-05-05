@@ -22,7 +22,7 @@ TRANSFER_LISTEN_PORT = 49200
 
 def run_tray_app() -> int:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtGui import QAction
+    from PySide6.QtGui import QAction, QCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -54,7 +54,7 @@ def run_tray_app() -> int:
                 return transfer_error
             if discovery_error:
                 return discovery_error
-            return "正在发现局域网用户。拖入文件或文件夹后可发送。"
+            return "拖入文件，选择用户后发送。"
 
         def stop(self) -> None:
             self.stop_discovery()
@@ -115,17 +115,19 @@ def run_tray_app() -> int:
             self._send_lock = threading.Lock()
 
             self.setWindowTitle("LocalNetFTP")
-            self.setMinimumSize(460, 420)
+            self.setMinimumSize(340, 360)
+            self.setMaximumWidth(420)
             self.setAcceptDrops(True)
+            self.setWindowOpacity(0.92)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.setWindowFlag(Qt.Tool, True)
 
-            title = QLabel("LocalNetFTP")
-            title.setObjectName("titleLabel")
-
-            self.status = QLabel("正在启动局域网发现和文件接收服务。")
+            self.status = QLabel("拖入文件，选择用户后发送。")
             self.status.setWordWrap(True)
+            self.status.setObjectName("floatingStatus")
 
             peers_label = QLabel("在线用户")
+            peers_label.setObjectName("sectionLabel")
             self.peer_list = QListWidget()
             self.peer_list.setAlternatingRowColors(True)
             self.peer_list.setSelectionMode(QListWidget.ExtendedSelection)
@@ -133,6 +135,7 @@ def run_tray_app() -> int:
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
             pending_label = QLabel("待发送")
+            pending_label.setObjectName("sectionLabel")
             self.pending_list = QListWidget()
             self.pending_list.setAlternatingRowColors(True)
             self.pending_list.setSelectionMode(QListWidget.ExtendedSelection)
@@ -151,17 +154,16 @@ def run_tray_app() -> int:
             action_layout.addWidget(self.send_button)
 
             layout = QVBoxLayout(self)
-            layout.addWidget(title)
+            layout.setContentsMargins(14, 12, 14, 12)
+            layout.setSpacing(8)
             layout.addWidget(self.status)
-            layout.addSpacing(8)
             layout.addWidget(peers_label)
             layout.addWidget(self.peer_list, 1)
-            layout.addSpacing(8)
             layout.addWidget(pending_label)
             layout.addWidget(self.pending_list, 1)
             layout.addLayout(action_layout)
 
-            self.setStyleSheet(_app_stylesheet())
+            self.setStyleSheet(_floating_stylesheet())
 
             self._peer_refresh_timer = QTimer(self)
             self._peer_refresh_timer.setInterval(1000)
@@ -388,6 +390,11 @@ def run_tray_app() -> int:
     tray.setContextMenu(menu)
 
     def show_floating_window() -> None:
+        cursor_pos = QCursor.pos()
+        floating_window.adjustSize()
+        x = max(0, cursor_pos.x() - floating_window.width() + 16)
+        y = max(0, cursor_pos.y() - floating_window.height() - 16)
+        floating_window.move(x, y)
         floating_window.show()
         floating_window.raise_()
         floating_window.activateWindow()
@@ -438,5 +445,58 @@ def _app_stylesheet() -> str:
     QPushButton {
         min-height: 30px;
         padding: 3px 14px;
+    }
+    """
+
+
+def _floating_stylesheet() -> str:
+    return """
+    QWidget {
+        background-color: rgba(248, 250, 252, 235);
+        color: #172033;
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }
+    QLabel#floatingStatus {
+        color: #3b475c;
+        padding: 2px 0 4px 0;
+    }
+    QLabel#sectionLabel {
+        color: #536173;
+        font-size: 11px;
+        font-weight: 600;
+        padding-top: 2px;
+    }
+    QListWidget {
+        min-height: 96px;
+        border: 1px solid rgba(132, 146, 166, 150);
+        background-color: rgba(255, 255, 255, 225);
+        alternate-background-color: rgba(240, 244, 248, 215);
+        border-radius: 6px;
+        padding: 4px;
+        outline: 0;
+    }
+    QListWidget::item {
+        min-height: 24px;
+        padding: 3px 6px;
+        border-radius: 4px;
+    }
+    QListWidget::item:selected {
+        background-color: #2f7dd1;
+        color: white;
+    }
+    QPushButton {
+        min-height: 26px;
+        padding: 2px 12px;
+        border-radius: 5px;
+        border: 1px solid #9aa8ba;
+        background-color: rgba(255, 255, 255, 230);
+    }
+    QPushButton:hover {
+        background-color: #eef5ff;
+    }
+    QPushButton:disabled {
+        color: #8b95a3;
+        background-color: rgba(231, 235, 240, 210);
     }
     """
