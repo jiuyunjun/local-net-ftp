@@ -534,7 +534,7 @@ def run_tray_app() -> int:
             server = runtime.start_share_server()
             share_window.set_urls(server.urls())
         except Exception as exc:
-            QMessageBox.warning(None, "LocalNetFTP", f"投送模式启动失败：{exc}")
+            QMessageBox.warning(None, "LocalNetFTP", f"投送模式启动失败：{type(exc).__name__}: {exc}")
             return
         share_window.show()
         share_window.raise_()
