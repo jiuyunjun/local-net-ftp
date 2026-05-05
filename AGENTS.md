@@ -17,7 +17,7 @@
 
 ## 技术方向
 
-- 语言：Python 3.11+。
+- 语言：Python 3.10+。
 - 平台：Windows 优先。
 - GUI/托盘：优先使用成熟库，例如 PySide6/Qt；如改用其他方案，需要说明原因。
 - 打包：优先使用 PyInstaller，产物为 Windows exe。
