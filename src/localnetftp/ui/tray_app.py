@@ -22,7 +22,7 @@ TRANSFER_LISTEN_PORT = 49200
 
 def run_tray_app() -> int:
     from PySide6.QtCore import QTimer, Qt
-    from PySide6.QtGui import QAction, QCursor
+    from PySide6.QtGui import QAction
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -120,6 +120,12 @@ def run_tray_app() -> int:
             self.setWindowOpacity(0.92)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setWindowFlag(Qt.Tool, True)
+            self._initial_position_applied = False
+
+            self.device_name = QLineEdit(self._runtime.config.device_name)
+            self.device_name.setObjectName("floatingName")
+            self.device_name.setPlaceholderText("我的名字")
+            self.device_name.editingFinished.connect(self._save_device_name)
 
             self.peer_list = QListWidget()
             self.peer_list.setAlternatingRowColors(True)
@@ -129,7 +135,8 @@ def run_tray_app() -> int:
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(0)
+            layout.setSpacing(6)
+            layout.addWidget(self.device_name)
             layout.addWidget(self.peer_list, 1)
 
             self.setStyleSheet(_floating_stylesheet())
@@ -142,6 +149,28 @@ def run_tray_app() -> int:
         def set_status(self, text: str) -> None:
             if text:
                 print(f"LocalNetFTP: {text}", file=sys.stderr)
+
+        def reload_device_name(self) -> None:
+            self.device_name.blockSignals(True)
+            self.device_name.setText(self._runtime.config.device_name)
+            self.device_name.blockSignals(False)
+
+        def apply_initial_position(self, app: QApplication) -> None:
+            if self._initial_position_applied:
+                return
+
+            screen = app.primaryScreen()
+            if screen is None:
+                self._initial_position_applied = True
+                return
+
+            geometry = screen.availableGeometry()
+            self.adjustSize()
+            margin = 14
+            x = geometry.right() - self.width() - margin
+            y = geometry.bottom() - self.height() - margin
+            self.move(max(geometry.left(), x), max(geometry.top(), y))
+            self._initial_position_applied = True
 
         def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.mimeData().hasUrls():
@@ -156,6 +185,22 @@ def run_tray_app() -> int:
                 event.acceptProposedAction()
             else:
                 event.ignore()
+
+        def _save_device_name(self) -> None:
+            device_name = self.device_name.text().strip()
+            if not device_name:
+                self.reload_device_name()
+                return
+            if device_name == self._runtime.config.device_name:
+                return
+
+            config = AppConfig(
+                receive_dir=self._runtime.config.receive_dir,
+                start_on_boot=self._runtime.config.start_on_boot,
+                device_name=device_name,
+                device_id=self._runtime.config.device_id,
+            )
+            self.set_status(self._runtime.save_settings(config))
 
         def _selected_peer_names(self) -> list[str]:
             return [peer.identity.device_name for peer in self._selected_peers()]
@@ -341,7 +386,11 @@ def run_tray_app() -> int:
     floating_window = FloatingWindow(runtime)
     floating_window.set_status(startup_status)
 
-    settings_window = SettingsWindow(runtime, floating_window.set_status)
+    def on_settings_saved(status: str) -> None:
+        floating_window.reload_device_name()
+        floating_window.set_status(status)
+
+    settings_window = SettingsWindow(runtime, on_settings_saved)
 
     icon = app.style().standardIcon(QStyle.SP_DriveNetIcon)
     floating_window.setWindowIcon(icon)
@@ -359,11 +408,7 @@ def run_tray_app() -> int:
     tray.setContextMenu(menu)
 
     def show_floating_window() -> None:
-        cursor_pos = QCursor.pos()
-        floating_window.adjustSize()
-        x = max(0, cursor_pos.x() - floating_window.width() + 16)
-        y = max(0, cursor_pos.y() - floating_window.height() - 16)
-        floating_window.move(x, y)
+        floating_window.apply_initial_position(app)
         floating_window.show()
         floating_window.raise_()
         floating_window.activateWindow()
@@ -426,8 +471,16 @@ def _floating_stylesheet() -> str:
         font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
         font-size: 12px;
     }
+    QLineEdit#floatingName {
+        min-height: 28px;
+        padding: 3px 8px;
+        border: 1px solid rgba(132, 146, 166, 140);
+        border-radius: 6px;
+        background-color: rgba(255, 255, 255, 230);
+        font-weight: 600;
+    }
     QListWidget {
-        min-height: 200px;
+        min-height: 180px;
         border: 1px solid rgba(132, 146, 166, 150);
         background-color: rgba(255, 255, 255, 225);
         alternate-background-color: rgba(240, 244, 248, 215);
