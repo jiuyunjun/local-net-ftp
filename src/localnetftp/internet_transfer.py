@@ -32,6 +32,9 @@ def _register_iroh_dll_directory() -> None:
             return
         dll_dir = Path(spec.origin).parent.resolve()
         os.add_dll_directory(str(dll_dir))
+        # Nuitka onefile extracts all DLLs to the parent of the package dir;
+        # iroh_ffi.dll's own dependencies (MSVC runtime etc.) live there.
+        os.add_dll_directory(str(dll_dir.parent))
     except Exception:
         pass
 
