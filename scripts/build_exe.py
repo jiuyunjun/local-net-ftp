@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _iroh_dll_arg() -> str:
+    """Return a --include-data-files arg that puts iroh_ffi.dll at iroh/iroh_ffi.dll
+    inside the Nuitka extraction dir, matching the path iroh_ffi.py expects."""
+    spec = importlib.util.find_spec("iroh")
+    if spec is None or spec.origin is None:
+        raise RuntimeError("iroh package not found")
+    dll = Path(spec.origin).parent / "iroh_ffi.dll"
+    if not dll.exists():
+        raise FileNotFoundError(dll)
+    return f"--include-data-files={dll}=iroh/iroh_ffi.dll"
 
 
 def main() -> int:
@@ -19,7 +32,7 @@ def main() -> int:
         "--enable-plugin=pyside6",
         "--include-package=flask",
         "--include-package=iroh",
-        "--include-package-data=iroh",
+        _iroh_dll_arg(),  # iroh_ffi.dll must be at iroh/ so iroh_ffi.py finds it
         "--include-package=werkzeug",
         "--include-package=jinja2",
         "--include-package=click",

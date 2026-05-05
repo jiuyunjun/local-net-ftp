@@ -14,27 +14,37 @@ from localnetftp.transfer import ReceiveResult, available_destination_path
 
 
 def _register_iroh_dll_directory() -> None:
-    """On Windows, add iroh's package directory to the DLL search path.
+    """Pre-load iroh_ffi.dll on Windows before iroh_ffi.py's ctypes.cdll call.
 
-    Python 3.8+ no longer searches PATH/CWD for native DLL dependencies by default.
-    When running as a Nuitka onefile exe the extraction path may be an 8.3 short-form
-    temp dir (e.g. ON0689~1), which causes LoadLibraryEx to fail resolving
-    iroh_ffi.dll's own dependencies (MSVC runtime, etc.).
-    os.add_dll_directory() fixes this without requiring any PATH changes.
+    In Nuitka onefile the extraction dir name is an 8.3 short path (e.g. ONB809~1).
+    ctypes.cdll.LoadLibrary() called from iroh_ffi.py with that short path can fail
+    to resolve VCRUNTIME140.dll even though it lives in System32, because the short-path
+    form confuses Python 3.8+'s LOAD_LIBRARY_SEARCH_DEFAULT_DIRS.
+    Loading the DLL ourselves first via the long-path form puts it in Windows' module
+    cache; iroh_ffi.py's subsequent LoadLibrary call returns the cached handle.
     """
     if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
         return
     try:
+        import ctypes
         import importlib.util
 
         spec = importlib.util.find_spec("iroh")
         if spec is None or spec.origin is None:
             return
-        dll_dir = Path(spec.origin).parent.resolve()
+
+        # Convert 8.3 short path to long path so AddDllDirectory and LoadLibraryEx agree.
+        buf = ctypes.create_unicode_buffer(32768)
+        ctypes.windll.kernel32.GetLongPathNameW(str(Path(spec.origin).parent), buf, len(buf))
+        dll_dir = Path(buf.value) if buf.value else Path(spec.origin).parent
+
         os.add_dll_directory(str(dll_dir))
-        # Nuitka onefile extracts all DLLs to the parent of the package dir;
-        # iroh_ffi.dll's own dependencies (MSVC runtime etc.) live there.
         os.add_dll_directory(str(dll_dir.parent))
+
+        # Pre-load using the long path so Windows caches it before iroh_ffi.py loads it.
+        dll_path = dll_dir / "iroh_ffi.dll"
+        if dll_path.exists():
+            ctypes.CDLL(str(dll_path))
     except Exception:
         pass
 
