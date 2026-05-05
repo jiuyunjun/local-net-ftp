@@ -607,6 +607,16 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
             title = QLabel("收到文件")
             title.setObjectName("toastTitle")
+            close_button = QPushButton("×")
+            close_button.setObjectName("toastClose")
+            close_button.setToolTip("关闭")
+            close_button.clicked.connect(self.close)
+
+            title_layout = QHBoxLayout()
+            title_layout.setContentsMargins(0, 0, 0, 0)
+            title_layout.addWidget(title, 1)
+            title_layout.addWidget(close_button)
+
             message = QLabel(_received_message(self.paths))
             message.setObjectName("toastMessage")
             message.setWordWrap(True)
@@ -623,7 +633,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 10, 12, 12)
             layout.setSpacing(8)
-            layout.addWidget(title)
+            layout.addLayout(title_layout)
             layout.addWidget(message)
             layout.addLayout(button_layout)
 
@@ -821,6 +831,20 @@ def _toast_stylesheet() -> str:
     }
     QPushButton:hover {
         background-color: #eef5ff;
+    }
+    QPushButton#toastClose {
+        min-width: 22px;
+        max-width: 22px;
+        min-height: 22px;
+        max-height: 22px;
+        padding: 0;
+        border-radius: 11px;
+        border: 0;
+        background-color: transparent;
+        font-size: 16px;
+    }
+    QPushButton#toastClose:hover {
+        background-color: rgba(226, 232, 240, 220);
     }
     """
 
