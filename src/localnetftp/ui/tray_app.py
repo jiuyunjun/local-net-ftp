@@ -10,6 +10,7 @@ from localnetftp.config import (
     save_config,
     set_start_on_boot,
 )
+from localnetftp.ui.drop_paths import append_unique_paths, local_paths_from_urls
 
 
 def run_tray_app() -> int:
@@ -22,6 +23,7 @@ def run_tray_app() -> int:
         QHBoxLayout,
         QLabel,
         QLineEdit,
+        QListWidget,
         QMenu,
         QMessageBox,
         QPushButton,
@@ -35,15 +37,16 @@ def run_tray_app() -> int:
         def __init__(self) -> None:
             super().__init__()
             self.setWindowTitle("LocalNetFTP")
-            self.setMinimumSize(420, 220)
+            self.setMinimumSize(520, 360)
             self.setAcceptDrops(True)
 
             self._config = load_config()
+            self._pending_paths: list[Path] = []
 
             title = QLabel("LocalNetFTP")
             title.setObjectName("titleLabel")
 
-            status = QLabel("局域网传输功能开发中。现在可以先配置接收目录和开机自启动。")
+            status = QLabel("拖入文件或文件夹后会显示在待发送列表。传输功能开发中。")
             status.setWordWrap(True)
 
             receive_label = QLabel("接收目录")
@@ -60,8 +63,22 @@ def run_tray_app() -> int:
                 is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
             )
 
+            pending_label = QLabel("待发送")
+            self.pending_list = QListWidget()
+            self.pending_list.setAlternatingRowColors(True)
+            self.pending_list.setSelectionMode(QListWidget.ExtendedSelection)
+            self.pending_list.setToolTip("把文件或文件夹拖到窗口中")
+
+            clear_button = QPushButton("清空列表")
+            clear_button.clicked.connect(self._clear_pending_paths)
+
             save_button = QPushButton("保存设置")
             save_button.clicked.connect(self._save)
+
+            action_layout = QHBoxLayout()
+            action_layout.addWidget(clear_button)
+            action_layout.addStretch(1)
+            action_layout.addWidget(save_button)
 
             layout = QVBoxLayout(self)
             layout.addWidget(title)
@@ -70,8 +87,10 @@ def run_tray_app() -> int:
             layout.addWidget(receive_label)
             layout.addLayout(receive_layout)
             layout.addWidget(self.start_on_boot)
-            layout.addStretch(1)
-            layout.addWidget(save_button, alignment=Qt.AlignRight)
+            layout.addSpacing(8)
+            layout.addWidget(pending_label)
+            layout.addWidget(self.pending_list, 1)
+            layout.addLayout(action_layout)
 
             self.setStyleSheet(
                 """
@@ -87,6 +106,9 @@ def run_tray_app() -> int:
                     min-height: 28px;
                     padding: 3px 6px;
                 }
+                QListWidget {
+                    min-height: 120px;
+                }
                 QPushButton {
                     min-height: 30px;
                     padding: 3px 14px;
@@ -94,10 +116,34 @@ def run_tray_app() -> int:
                 """
             )
 
+        def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.mimeData().hasUrls():
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+
+        def dropEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            paths = local_paths_from_urls(event.mimeData().urls())
+            if paths:
+                self._set_pending_paths(append_unique_paths(self._pending_paths, paths))
+                event.acceptProposedAction()
+            else:
+                event.ignore()
+
         def _choose_receive_dir(self) -> None:
             selected = QFileDialog.getExistingDirectory(self, "选择接收目录", self.receive_dir.text())
             if selected:
                 self.receive_dir.setText(selected)
+
+        def _clear_pending_paths(self) -> None:
+            self._set_pending_paths([])
+
+        def _set_pending_paths(self, paths: list[Path]) -> None:
+            self._pending_paths = paths
+            self.pending_list.clear()
+            for path in paths:
+                marker = "[文件夹]" if path.is_dir() else "[文件]"
+                self.pending_list.addItem(f"{marker} {path}")
 
         def _save(self) -> None:
             receive_dir = Path(self.receive_dir.text()).expanduser()
