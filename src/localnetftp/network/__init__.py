@@ -11,12 +11,14 @@ from localnetftp.network.discovery import (
     decode_hello,
     encode_hello,
 )
+from localnetftp.network.discovery_service import DiscoveryService
 
 __all__ = [
     "DISCOVERY_MESSAGE_TYPE",
     "DISCOVERY_PORT",
     "DISCOVERY_VERSION",
     "DeviceIdentity",
+    "DiscoveryService",
     "Peer",
     "PeerDirectory",
     "create_device_identity",

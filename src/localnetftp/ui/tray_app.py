@@ -10,11 +10,15 @@ from localnetftp.config import (
     save_config,
     set_start_on_boot,
 )
+from localnetftp.network import DiscoveryService, create_device_identity
 from localnetftp.ui.drop_paths import append_unique_paths, local_paths_from_urls
 
 
+TRANSFER_LISTEN_PORT = 49200
+
+
 def run_tray_app() -> int:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QTimer, Qt
     from PySide6.QtGui import QAction, QIcon
     from PySide6.QtWidgets import (
         QApplication,
@@ -41,13 +45,15 @@ def run_tray_app() -> int:
             self.setAcceptDrops(True)
 
             self._config = load_config()
+            save_config(self._config)
             self._pending_paths: list[Path] = []
+            self._discovery_service: DiscoveryService | None = None
 
             title = QLabel("LocalNetFTP")
             title.setObjectName("titleLabel")
 
-            status = QLabel("拖入文件或文件夹后会显示在待发送列表。传输功能开发中。")
-            status.setWordWrap(True)
+            self.status = QLabel("拖入文件或文件夹后会显示在待发送列表。传输功能开发中。")
+            self.status.setWordWrap(True)
 
             device_label = QLabel("本机名称")
             self.device_name = QLineEdit(self._config.device_name)
@@ -66,6 +72,12 @@ def run_tray_app() -> int:
             self.start_on_boot.setChecked(
                 is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
             )
+
+            peers_label = QLabel("在线用户")
+            self.peer_list = QListWidget()
+            self.peer_list.setAlternatingRowColors(True)
+            self.peer_list.setSelectionMode(QListWidget.ExtendedSelection)
+            self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
 
             pending_label = QLabel("待发送")
             self.pending_list = QListWidget()
@@ -86,13 +98,16 @@ def run_tray_app() -> int:
 
             layout = QVBoxLayout(self)
             layout.addWidget(title)
-            layout.addWidget(status)
+            layout.addWidget(self.status)
             layout.addSpacing(8)
             layout.addWidget(device_label)
             layout.addWidget(self.device_name)
             layout.addWidget(receive_label)
             layout.addLayout(receive_layout)
             layout.addWidget(self.start_on_boot)
+            layout.addSpacing(8)
+            layout.addWidget(peers_label)
+            layout.addWidget(self.peer_list, 1)
             layout.addSpacing(8)
             layout.addWidget(pending_label)
             layout.addWidget(self.pending_list, 1)
@@ -121,6 +136,11 @@ def run_tray_app() -> int:
                 }
                 """
             )
+            self._peer_refresh_timer = QTimer(self)
+            self._peer_refresh_timer.setInterval(1000)
+            self._peer_refresh_timer.timeout.connect(self._refresh_peers)
+            self._peer_refresh_timer.start()
+            self._start_discovery()
 
         def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.mimeData().hasUrls():
@@ -162,14 +182,56 @@ def run_tray_app() -> int:
                 receive_dir=receive_dir,
                 start_on_boot=self.start_on_boot.isChecked(),
                 device_name=device_name,
+                device_id=self._config.device_id,
             )
             save_config(config)
+            self._config = config
             set_start_on_boot(
                 config.start_on_boot,
                 _current_executable(),
                 app_name="LocalNetFTP",
             )
+            self._restart_discovery()
             QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
+
+        def _start_discovery(self) -> None:
+            identity = create_device_identity(
+                self._config.device_name,
+                listen_port=TRANSFER_LISTEN_PORT,
+                device_id=self._config.device_id,
+            )
+            self._discovery_service = DiscoveryService(identity)
+            try:
+                self._discovery_service.start()
+            except OSError as exc:
+                self._discovery_service = None
+                self.status.setText(f"局域网发现启动失败：{exc}")
+                return
+            self.status.setText("正在发现局域网用户。拖入文件或文件夹后会显示在待发送列表。")
+
+        def _restart_discovery(self) -> None:
+            self._stop_discovery()
+            self._start_discovery()
+
+        def _stop_discovery(self) -> None:
+            if self._discovery_service is not None:
+                self._discovery_service.stop()
+                self._discovery_service = None
+
+        def _refresh_peers(self) -> None:
+            self.peer_list.clear()
+            if self._discovery_service is None:
+                return
+
+            peers = self._discovery_service.peers()
+            if not peers:
+                self.peer_list.addItem("暂无在线用户")
+                return
+
+            for peer in peers:
+                self.peer_list.addItem(
+                    f"{peer.identity.device_name}  {peer.address}:{peer.identity.listen_port}"
+                )
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if QSystemTrayIcon.isSystemTrayAvailable():
@@ -213,6 +275,7 @@ def run_tray_app() -> int:
 
     tray.activated.connect(on_tray_activated)
     tray.show()
+    app.aboutToQuit.connect(window._stop_discovery)
     show_window()
 
     return app.exec()
