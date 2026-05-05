@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import getpass
+import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ class AppConfig:
     receive_dir: Path
     start_on_boot: bool = False
     device_name: str = ""
+    device_id: str = ""
 
     def to_json_data(self) -> dict[str, Any]:
         data = asdict(self)
@@ -41,7 +43,11 @@ def default_config_path() -> Path:
 
 
 def default_config() -> AppConfig:
-    return AppConfig(receive_dir=default_download_dir(), device_name=default_device_name())
+    return AppConfig(
+        receive_dir=default_download_dir(),
+        device_name=default_device_name(),
+        device_id=default_device_id(),
+    )
 
 
 def default_device_name() -> str:
@@ -54,6 +60,10 @@ def default_device_name() -> str:
         return f"{user_name.strip()} PC"
 
     return "LocalNetFTP PC"
+
+
+def default_device_id() -> str:
+    return str(uuid.uuid4())
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -99,8 +109,17 @@ def _config_from_json_data(raw_data: object) -> AppConfig:
     else:
         raise ValueError("Config field 'device_name' must be a non-empty string.")
 
+    device_id = raw_data.get("device_id")
+    if device_id is None:
+        local_device_id = default_device_id()
+    elif isinstance(device_id, str) and device_id.strip():
+        local_device_id = device_id.strip()
+    else:
+        raise ValueError("Config field 'device_id' must be a non-empty string.")
+
     return AppConfig(
         receive_dir=receive_path,
         start_on_boot=start_on_boot,
         device_name=display_name,
+        device_id=local_device_id,
     )

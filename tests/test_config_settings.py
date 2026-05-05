@@ -7,6 +7,7 @@ from localnetftp.config import (
     APP_NAME,
     AppConfig,
     default_config_dir,
+    default_device_id,
     default_device_name,
     default_download_dir,
     load_config,
@@ -37,10 +38,16 @@ def test_default_device_name_falls_back_to_user_name(monkeypatch):
     assert default_device_name() == "alice PC"
 
 
+def test_default_device_id_returns_uuid_string():
+    assert len(default_device_id()) == 36
+
+
 def test_load_config_returns_defaults_when_file_is_missing(tmp_path):
     config = load_config(tmp_path / "missing.json")
 
-    assert config == AppConfig(receive_dir=default_download_dir(), device_name=default_device_name())
+    assert config.receive_dir == default_download_dir()
+    assert config.device_name == default_device_name()
+    assert config.device_id
 
 
 def test_save_and_load_config_round_trip(tmp_path):
@@ -49,6 +56,7 @@ def test_save_and_load_config_round_trip(tmp_path):
         receive_dir=tmp_path / "Downloads",
         start_on_boot=True,
         device_name="A-PC",
+        device_id="device-a",
     )
 
     saved_path = save_config(expected, config_path)
@@ -60,6 +68,7 @@ def test_save_and_load_config_round_trip(tmp_path):
         "receive_dir": str(tmp_path / "Downloads"),
         "start_on_boot": True,
         "device_name": "A-PC",
+        "device_id": "device-a",
     }
 
 
@@ -84,4 +93,12 @@ def test_load_config_rejects_invalid_device_name(tmp_path):
     config_path.write_text('{"device_name": "   "}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="device_name"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_device_id(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"device_id": ""}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="device_id"):
         load_config(config_path)
