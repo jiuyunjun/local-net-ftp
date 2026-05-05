@@ -28,6 +28,26 @@ def test_send_paths_transfers_file_and_folder(tmp_path):
     assert (receive_dir / "single.txt").read_text(encoding="utf-8") == "world"
 
 
+def test_send_paths_reports_progress(tmp_path):
+    receive_dir = tmp_path / "receive"
+    single_file = tmp_path / "single.txt"
+    single_file.write_text("world", encoding="utf-8")
+    events = []
+
+    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server.start()
+    try:
+        send_paths("127.0.0.1", server._port, [single_file], on_progress=events.append)
+        _wait_for(lambda: (receive_dir / "single.txt").exists())
+    finally:
+        server.stop()
+
+    assert [(event.event, event.relative_path, event.item_index, event.item_count) for event in events] == [
+        ("start", "single.txt", 1, 1),
+        ("done", "single.txt", 1, 1),
+    ]
+
+
 def test_send_paths_keeps_existing_file_when_names_conflict(tmp_path):
     receive_dir = tmp_path / "receive"
     receive_dir.mkdir()

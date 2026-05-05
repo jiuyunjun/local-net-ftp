@@ -1,6 +1,6 @@
 """File scanning, chunking, resume, and transfer workers."""
 
-from localnetftp.transfer.client import send_paths
+from localnetftp.transfer.client import TransferProgress, send_paths
 from localnetftp.transfer.protocol import (
     TransferItem,
     available_destination_path,
@@ -11,6 +11,7 @@ from localnetftp.transfer.server import TransferServer
 
 __all__ = [
     "TransferItem",
+    "TransferProgress",
     "TransferServer",
     "available_destination_path",
     "safe_destination_path",

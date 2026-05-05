@@ -14,7 +14,7 @@ from localnetftp.config import (
 )
 from localnetftp.network import DiscoveryService, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
-from localnetftp.transfer import TransferServer, send_paths
+from localnetftp.transfer import TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
 from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
@@ -178,6 +178,8 @@ def run_tray_app() -> int:
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
             self.paste_input = PasteInput(self._paste_clipboard)
+            self.transfer_status = QLabel("")
+            self.transfer_status.setObjectName("transferStatus")
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(8, 8, 8, 8)
@@ -185,6 +187,7 @@ def run_tray_app() -> int:
             layout.addWidget(self.device_name)
             layout.addWidget(self.peer_list, 1)
             layout.addWidget(self.paste_input)
+            layout.addWidget(self.transfer_status)
 
             self.setStyleSheet(_floating_stylesheet())
 
@@ -332,17 +335,35 @@ def run_tray_app() -> int:
 
         def _send_to_peer(self, peer, paths: list[Path]) -> None:
             failed = False
+            error_message = ""
             try:
-                send_paths(peer.address, peer.identity.listen_port, paths)
+                send_paths(
+                    peer.address,
+                    peer.identity.listen_port,
+                    paths,
+                    on_progress=lambda progress: self._send_progress(peer.identity.device_name, progress),
+                )
             except Exception as exc:
                 failed = True
+                error_message = str(exc)
                 print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
                 with self._send_lock:
                     self._send_failures.append(peer.identity.device_name)
             finally:
-                QTimer.singleShot(0, lambda: self._send_finished(peer.identity.device_name, failed))
+                QTimer.singleShot(
+                    0,
+                    lambda: self._send_finished(peer.identity.device_name, failed, error_message),
+                )
 
-        def _send_finished(self, peer_name: str, failed: bool) -> None:
+        def _send_progress(self, peer_name: str, progress: TransferProgress) -> None:
+            QTimer.singleShot(
+                0,
+                lambda: self.transfer_status.setText(
+                    f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path}"
+                ),
+            )
+
+        def _send_finished(self, peer_name: str, failed: bool, error_message: str = "") -> None:
             with self._send_lock:
                 self._active_send_count = max(0, self._active_send_count - 1)
                 active_send_count = self._active_send_count
@@ -353,10 +374,13 @@ def run_tray_app() -> int:
 
             if failures:
                 print(f"LocalNetFTP: 发送完成，失败：{'、'.join(failures)}", file=sys.stderr)
+                self.transfer_status.setText(f"失败：{'、'.join(failures)} {error_message}".strip())
             elif failed:
                 print(f"LocalNetFTP: 发送到 {peer_name} 失败。", file=sys.stderr)
+                self.transfer_status.setText(f"{peer_name} 失败：{error_message}")
             else:
                 print("LocalNetFTP: 发送完成。", file=sys.stderr)
+                self.transfer_status.setText("发送完成")
             self._update_send_button()
 
         def _refresh_peers(self) -> None:
@@ -635,6 +659,11 @@ def _floating_stylesheet() -> str:
         border-radius: 6px;
         background-color: rgba(255, 255, 255, 220);
         color: #334155;
+    }
+    QLabel#transferStatus {
+        color: #536173;
+        font-size: 11px;
+        min-height: 18px;
     }
     QListWidget {
         min-height: 180px;
