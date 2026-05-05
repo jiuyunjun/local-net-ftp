@@ -54,7 +54,7 @@ def run_tray_app() -> int:
                 return transfer_error
             if discovery_error:
                 return discovery_error
-            return "拖入文件，选择用户后发送。"
+            return ""
 
         def stop(self) -> None:
             self.stop_discovery()
@@ -114,19 +114,13 @@ def run_tray_app() -> int:
             self._send_lock = threading.Lock()
 
             self.setWindowTitle("LocalNetFTP")
-            self.setMinimumSize(300, 260)
-            self.setMaximumWidth(360)
+            self.setMinimumSize(260, 220)
+            self.setMaximumWidth(320)
             self.setAcceptDrops(True)
             self.setWindowOpacity(0.92)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setWindowFlag(Qt.Tool, True)
 
-            self.status = QLabel("选择用户后，把文件或文件夹拖到这里。")
-            self.status.setWordWrap(True)
-            self.status.setObjectName("floatingStatus")
-
-            peers_label = QLabel("在线用户")
-            peers_label.setObjectName("sectionLabel")
             self.peer_list = QListWidget()
             self.peer_list.setAlternatingRowColors(True)
             self.peer_list.setSelectionMode(QListWidget.ExtendedSelection)
@@ -134,10 +128,8 @@ def run_tray_app() -> int:
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
             layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 12, 14, 12)
-            layout.setSpacing(8)
-            layout.addWidget(self.status)
-            layout.addWidget(peers_label)
+            layout.setContentsMargins(8, 8, 8, 8)
+            layout.setSpacing(0)
             layout.addWidget(self.peer_list, 1)
 
             self.setStyleSheet(_floating_stylesheet())
@@ -148,7 +140,8 @@ def run_tray_app() -> int:
             self._peer_refresh_timer.start()
 
         def set_status(self, text: str) -> None:
-            self.status.setText(text)
+            if text:
+                print(f"LocalNetFTP: {text}", file=sys.stderr)
 
         def dragEnterEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.mimeData().hasUrls():
@@ -177,12 +170,7 @@ def run_tray_app() -> int:
             return peers
 
         def _update_send_button(self) -> None:
-            if self._active_send_count:
-                self.status.setText("正在发送...")
-            elif self._selected_peers():
-                self.status.setText("把文件或文件夹拖到这里发送。")
-            else:
-                self.status.setText("选择用户后，把文件或文件夹拖到这里。")
+            return
 
         def _confirm_and_send(self, paths: list[Path]) -> None:
             peers = self._selected_peers()
@@ -207,7 +195,7 @@ def run_tray_app() -> int:
                 self._active_send_count = len(peers)
                 self._send_failures = []
 
-            self.status.setText(send_summary(peer_names, paths))
+            print(f"LocalNetFTP: {send_summary(peer_names, paths)}", file=sys.stderr)
             self._update_send_button()
             for peer in peers:
                 threading.Thread(
@@ -239,11 +227,11 @@ def run_tray_app() -> int:
                 return
 
             if failures:
-                self.status.setText(f"发送完成，失败：{'、'.join(failures)}")
+                print(f"LocalNetFTP: 发送完成，失败：{'、'.join(failures)}", file=sys.stderr)
             elif failed:
-                self.status.setText(f"发送到 {peer_name} 失败。")
+                print(f"LocalNetFTP: 发送到 {peer_name} 失败。", file=sys.stderr)
             else:
-                self.status.setText("发送完成。")
+                print("LocalNetFTP: 发送完成。", file=sys.stderr)
             self._update_send_button()
 
         def _refresh_peers(self) -> None:
@@ -438,18 +426,8 @@ def _floating_stylesheet() -> str:
         font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
         font-size: 12px;
     }
-    QLabel#floatingStatus {
-        color: #3b475c;
-        padding: 2px 0 4px 0;
-    }
-    QLabel#sectionLabel {
-        color: #536173;
-        font-size: 11px;
-        font-weight: 600;
-        padding-top: 2px;
-    }
     QListWidget {
-        min-height: 180px;
+        min-height: 200px;
         border: 1px solid rgba(132, 146, 166, 150);
         background-color: rgba(255, 255, 255, 225);
         alternate-background-color: rgba(240, 244, 248, 215);
