@@ -594,25 +594,74 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             QApplication.clipboard().setText(url)
             self.copy_status.setText("已复制")
 
+    class ReceiveToast(QWidget):
+        def __init__(self, result: ReceiveResult) -> None:
+            super().__init__()
+            self.paths = result.paths
+            self.setWindowTitle("收到文件")
+            self.setWindowFlag(Qt.Tool, True)
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            self.setFixedWidth(320)
+
+            title = QLabel("收到文件")
+            title.setObjectName("toastTitle")
+            message = QLabel(_received_message(self.paths))
+            message.setObjectName("toastMessage")
+            message.setWordWrap(True)
+
+            open_folder = QPushButton("打开保存位置")
+            open_folder.clicked.connect(self._open_save_location)
+            open_item = QPushButton(_open_item_button_text(self.paths))
+            open_item.clicked.connect(self._open_received_item)
+
+            button_layout = QHBoxLayout()
+            button_layout.addWidget(open_folder)
+            button_layout.addWidget(open_item)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(12, 10, 12, 12)
+            layout.setSpacing(8)
+            layout.addWidget(title)
+            layout.addWidget(message)
+            layout.addLayout(button_layout)
+
+            self.setStyleSheet(_toast_stylesheet())
+            QTimer.singleShot(6500, self.close)
+
+        def show_near_tray(self, app: QApplication) -> None:
+            screen = app.primaryScreen()
+            if screen is None:
+                self.show()
+                return
+            self.adjustSize()
+            geometry = screen.availableGeometry()
+            margin = 16
+            x = geometry.right() - self.width() - margin
+            y = geometry.bottom() - self.height() - margin
+            self.move(max(geometry.left(), x), max(geometry.top(), y))
+            self.show()
+
+        def _open_save_location(self) -> None:
+            _open_save_location(self.paths)
+            self.close()
+
+        def _open_received_item(self) -> None:
+            _open_received_item(self.paths)
+            self.close()
+
+    active_toasts: list[ReceiveToast] = []
+
     def show_received_prompt(result: ReceiveResult) -> None:
         paths = result.paths
         if not paths:
             return
 
-        message = QMessageBox()
-        message.setWindowTitle("收到文件")
-        message.setIcon(QMessageBox.Information)
-        message.setText(_received_message(paths))
-        open_folder_button = message.addButton("打开保存文件夹", QMessageBox.ActionRole)
-        open_item_button = message.addButton(_open_item_button_text(paths), QMessageBox.ActionRole)
-        message.addButton("关闭", QMessageBox.RejectRole)
-        message.exec()
-
-        clicked = message.clickedButton()
-        if clicked == open_folder_button:
-            _open_save_location(paths)
-        elif clicked == open_item_button:
-            _open_received_item(paths)
+        toast = ReceiveToast(result)
+        active_toasts.append(toast)
+        toast.destroyed.connect(lambda: active_toasts.remove(toast) if toast in active_toasts else None)
+        toast.show_near_tray(app)
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -740,6 +789,40 @@ def _open_received_item(paths: list[Path]) -> None:
 
 def _open_path(path: Path) -> None:
     os.startfile(path)  # type: ignore[attr-defined]
+
+
+def _toast_stylesheet() -> str:
+    return """
+    QWidget {
+        background-color: rgba(250, 252, 255, 245);
+        color: #172033;
+        border: 1px solid rgba(132, 146, 166, 120);
+        border-radius: 8px;
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }
+    QLabel {
+        border: 0;
+        background-color: transparent;
+    }
+    QLabel#toastTitle {
+        font-size: 14px;
+        font-weight: 600;
+    }
+    QLabel#toastMessage {
+        color: #465568;
+    }
+    QPushButton {
+        min-height: 26px;
+        padding: 2px 10px;
+        border-radius: 5px;
+        border: 1px solid #9aa8ba;
+        background-color: rgba(255, 255, 255, 235);
+    }
+    QPushButton:hover {
+        background-color: #eef5ff;
+    }
+    """
 
 
 def _app_stylesheet() -> str:
