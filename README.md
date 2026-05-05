@@ -59,6 +59,8 @@ python -m localnetftp --dev-instance B
 
 Development instances use isolated config folders, different receive ports, and a local peer registry so the two tray windows can discover each other as `127.0.0.1` peers.
 
+Internet transfer uses the Python `iroh` package directly. Select `局域网外用户（生成 ticket）` in the floating window, drop a file or folder, then share the generated ticket. The receiver can right-click the tray icon and choose `输入 ticket 接收文件`.
+
 Build exe:
 
 ```powershell

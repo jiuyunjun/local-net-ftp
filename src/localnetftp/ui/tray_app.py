@@ -16,6 +16,7 @@ from localnetftp.config import (
     save_config,
     set_start_on_boot,
 )
+from localnetftp.internet_transfer import IrohTicketProvider, IrohTicketReceiver, InternetTicket
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
 from localnetftp.transfer import ReceiveResult, TransferProgress, TransferServer, send_paths
@@ -70,6 +71,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         QMenu,
         QMessageBox,
         QPushButton,
+        QInputDialog,
+        QPlainTextEdit,
         QStyle,
         QSystemTrayIcon,
         QVBoxLayout,
@@ -109,6 +112,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     class UiEvents(QObject):
         received = Signal(object)
+        error = Signal(str)
+        internet_ticket = Signal(object, object)
 
     class AppRuntime:
         def __init__(self) -> None:
@@ -119,6 +124,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.discovery_service: DiscoveryService | None = None
             self.transfer_server: TransferServer | None = None
             self.share_server: DownloadShareServer | None = None
+            self.internet_providers: list[IrohTicketProvider] = []
+            self.internet_receivers: list[IrohTicketReceiver] = []
             self.local_peer_registry = (
                 LocalPeerRegistry(runtime_options.dev_registry_path)
                 if runtime_options.dev_registry_path is not None
@@ -155,6 +162,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.stop_discovery()
             self.stop_transfer_server()
             self.stop_share_server()
+            self.stop_internet_providers()
 
         def save_settings(self, config: AppConfig) -> str:
             save_config(config, self.config_path)
@@ -237,11 +245,43 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.share_server.stop()
                 self.share_server = None
 
+        def start_internet_provider(self, paths: list[Path]) -> None:
+            provider = IrohTicketProvider(
+                paths,
+                work_dir=self.config_dir / "iroh",
+                on_ticket=lambda ticket: ui_events.internet_ticket.emit(provider, ticket),
+                on_error=lambda error: ui_events.error.emit(f"Iroh 发送失败：{error}"),
+            )
+            self.internet_providers.append(provider)
+            provider.start()
+
+        def stop_internet_provider(self, provider: IrohTicketProvider) -> None:
+            provider.stop()
+            if provider in self.internet_providers:
+                self.internet_providers.remove(provider)
+
+        def stop_internet_providers(self) -> None:
+            for provider in list(self.internet_providers):
+                provider.stop()
+            self.internet_providers.clear()
+
+        def receive_internet_ticket(self, ticket: str) -> None:
+            receiver = IrohTicketReceiver(
+                ticket,
+                receive_dir=self.config.receive_dir,
+                work_dir=self.config_dir / "iroh",
+                on_received=lambda result: ui_events.received.emit(result),
+                on_error=lambda error: ui_events.error.emit(f"Iroh 接收失败：{error}"),
+            )
+            self.internet_receivers.append(receiver)
+            receiver.start()
+
     class FloatingWindow(QWidget):
         def __init__(self, runtime: AppRuntime) -> None:
             super().__init__()
             self._runtime = runtime
             self._peers_by_row = {}
+            self._internet_row: int | None = None
             self._active_send_count = 0
             self._send_failures: list[str] = []
             self._send_lock = threading.Lock()
@@ -373,7 +413,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             return []
 
         def _selected_peer_names(self) -> list[str]:
-            return [peer.identity.device_name for peer in self._selected_peers()]
+            names = [peer.identity.device_name for peer in self._selected_peers()]
+            if self._is_internet_selected():
+                names.append("局域网外用户")
+            return names
 
         def _selected_peers(self):
             peers = []
@@ -384,13 +427,22 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                     peers.append(peer)
             return peers
 
+        def _is_internet_selected(self) -> bool:
+            if self._internet_row is None:
+                return False
+            return any(self.peer_list.row(item) == self._internet_row for item in self.peer_list.selectedItems())
+
         def _update_send_button(self) -> None:
             return
 
         def _confirm_and_send(self, paths: list[Path]) -> None:
             peers = self._selected_peers()
             peer_names = [peer.identity.device_name for peer in peers]
-            if not can_send(len(peers), len(paths)):
+            internet_selected = self._is_internet_selected()
+            display_names = list(peer_names)
+            if internet_selected:
+                display_names.append("局域网外用户")
+            if not can_send(len(display_names), len(paths)):
                 QMessageBox.information(self, "LocalNetFTP", "请先选择要发送给谁。")
                 self._update_send_button()
                 return
@@ -398,7 +450,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             result = QMessageBox.question(
                 self,
                 "确认发送",
-                confirmation_text(peer_names, paths),
+                confirmation_text(display_names, paths),
                 QMessageBox.Ok | QMessageBox.Cancel,
                 QMessageBox.Ok,
             )
@@ -406,19 +458,24 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self._update_send_button()
                 return
 
-            with self._send_lock:
-                self._active_send_count = len(peers)
-                self._send_failures = []
+            if internet_selected:
+                self.transfer_status.setText("正在生成公网 ticket...")
+                self._runtime.start_internet_provider(paths)
 
-            print(f"LocalNetFTP: {send_summary(peer_names, paths)}", file=sys.stderr)
-            self._update_send_button()
-            for peer in peers:
-                threading.Thread(
-                    target=self._send_to_peer,
-                    args=(peer, list(paths)),
-                    name=f"LocalNetFTPSend-{peer.identity.device_id}",
-                    daemon=True,
-                ).start()
+            if peers:
+                with self._send_lock:
+                    self._active_send_count = len(peers)
+                    self._send_failures = []
+
+                print(f"LocalNetFTP: {send_summary(peer_names, paths)}", file=sys.stderr)
+                self._update_send_button()
+                for peer in peers:
+                    threading.Thread(
+                        target=self._send_to_peer,
+                        args=(peer, list(paths)),
+                        name=f"LocalNetFTPSend-{peer.identity.device_id}",
+                        daemon=True,
+                    ).start()
 
         def _send_to_peer(self, peer, paths: list[Path]) -> None:
             failed = False
@@ -474,10 +531,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
             self._peers_by_row = {}
+            self._internet_row = self.peer_list.count()
+            self.peer_list.addItem("局域网外用户（生成 ticket）")
+            if "局域网外用户" in selected_names:
+                self.peer_list.item(self._internet_row).setSelected(True)
 
             peers = self._runtime.peers()
             if not peers:
-                self.peer_list.addItem("暂无在线用户")
                 self._update_send_button()
                 return
 
@@ -594,6 +654,40 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             QApplication.clipboard().setText(url)
             self.copy_status.setText("已复制")
 
+    class TicketWindow(QWidget):
+        def __init__(self, runtime: AppRuntime, provider: IrohTicketProvider, ticket: InternetTicket) -> None:
+            super().__init__()
+            self._runtime = runtime
+            self._provider = provider
+            self.setWindowTitle("公网 ticket")
+            self.setMinimumSize(560, 260)
+
+            label = QLabel("把这个 ticket 发给对方。窗口关闭前，文件会保持可下载。")
+            self.ticket_text = QPlainTextEdit(ticket.ticket)
+            self.ticket_text.setReadOnly(True)
+
+            copy_button = QPushButton("复制 ticket")
+            copy_button.clicked.connect(self._copy_ticket)
+            close_button = QPushButton("停止分享")
+            close_button.clicked.connect(self.close)
+
+            button_layout = QHBoxLayout()
+            button_layout.addWidget(copy_button)
+            button_layout.addWidget(close_button)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(label)
+            layout.addWidget(self.ticket_text, 1)
+            layout.addLayout(button_layout)
+            self.setStyleSheet(_app_stylesheet())
+
+        def _copy_ticket(self) -> None:
+            QApplication.clipboard().setText(self.ticket_text.toPlainText())
+
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._runtime.stop_internet_provider(self._provider)
+            super().closeEvent(event)
+
     class ReceiveToast(QWidget):
         def __init__(self, result: ReceiveResult) -> None:
             super().__init__()
@@ -673,10 +767,26 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         toast.destroyed.connect(lambda: active_toasts.remove(toast) if toast in active_toasts else None)
         toast.show_near_tray(app)
 
+    ticket_windows: list[TicketWindow] = []
+
+    def show_ticket_window(provider: IrohTicketProvider, ticket: InternetTicket) -> None:
+        floating_window.transfer_status.setText("公网 ticket 已生成")
+        window = TicketWindow(runtime, provider, ticket)
+        ticket_windows.append(window)
+        window.destroyed.connect(lambda: ticket_windows.remove(window) if window in ticket_windows else None)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def show_error_message(message: str) -> None:
+        QMessageBox.warning(None, "LocalNetFTP", message)
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     ui_events = UiEvents()
     ui_events.received.connect(show_received_prompt)
+    ui_events.error.connect(show_error_message)
+    ui_events.internet_ticket.connect(show_ticket_window)
 
     runtime = AppRuntime()
     startup_status = runtime.start()
@@ -701,9 +811,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     menu = QMenu()
     share_action = QAction("投送模式", menu)
+    receive_ticket_action = QAction("输入 ticket 接收文件", menu)
     settings_action = QAction("设置", menu)
     quit_action = QAction("退出", menu)
     menu.addAction(share_action)
+    menu.addAction(receive_ticket_action)
     menu.addAction(settings_action)
     menu.addSeparator()
     menu.addAction(quit_action)
@@ -732,7 +844,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         share_window.raise_()
         share_window.activateWindow()
 
+    def receive_ticket() -> None:
+        ticket, accepted = QInputDialog.getMultiLineText(None, "输入 ticket", "粘贴对方发来的 ticket：")
+        if accepted and ticket.strip():
+            runtime.receive_internet_ticket(ticket)
+
     share_action.triggered.connect(show_share_window)
+    receive_ticket_action.triggered.connect(receive_ticket)
     settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)
 
