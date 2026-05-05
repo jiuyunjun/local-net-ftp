@@ -13,6 +13,7 @@ from localnetftp.config import (
     set_start_on_boot,
 )
 from localnetftp.network import DiscoveryService, create_device_identity
+from localnetftp.share import DownloadShareServer
 from localnetftp.transfer import TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
@@ -41,6 +42,8 @@ def run_tray_app() -> int:
         QVBoxLayout,
         QWidget,
     )
+
+    SHARE_PORT = 49300
 
     class NameEdit(QLineEdit):
         def __init__(self, text: str) -> None:
@@ -76,6 +79,7 @@ def run_tray_app() -> int:
             save_config(self.config)
             self.discovery_service: DiscoveryService | None = None
             self.transfer_server: TransferServer | None = None
+            self.share_server: DownloadShareServer | None = None
 
         def start(self) -> str:
             transfer_error = self.start_transfer_server()
@@ -89,6 +93,7 @@ def run_tray_app() -> int:
         def stop(self) -> None:
             self.stop_discovery()
             self.stop_transfer_server()
+            self.stop_share_server()
 
         def save_settings(self, config: AppConfig) -> str:
             save_config(config)
@@ -133,6 +138,17 @@ def run_tray_app() -> int:
             if self.discovery_service is not None:
                 self.discovery_service.stop()
                 self.discovery_service = None
+
+        def start_share_server(self) -> DownloadShareServer:
+            if self.share_server is None:
+                self.share_server = DownloadShareServer(_share_executable_path(), port=SHARE_PORT)
+                self.share_server.start()
+            return self.share_server
+
+        def stop_share_server(self) -> None:
+            if self.share_server is not None:
+                self.share_server.stop()
+                self.share_server = None
 
     class FloatingWindow(QWidget):
         def __init__(self, runtime: AppRuntime) -> None:
@@ -441,6 +457,32 @@ def run_tray_app() -> int:
             self._on_saved(status)
             QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
 
+    class ShareWindow(QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("投送模式")
+            self.setMinimumSize(520, 180)
+
+            self.url_list = QListWidget()
+            self.url_list.itemClicked.connect(self._copy_item)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(self.url_list)
+            self.setStyleSheet(_app_stylesheet())
+
+        def set_urls(self, urls: list[str]) -> None:
+            self.url_list.clear()
+            if not urls:
+                self.url_list.addItem("未找到可用局域网地址")
+                return
+            for url in urls:
+                self.url_list.addItem(url)
+
+        def _copy_item(self, item) -> None:
+            text = item.text()
+            if text.startswith("http://"):
+                QApplication.clipboard().setText(text)
+
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
 
@@ -455,17 +497,21 @@ def run_tray_app() -> int:
         floating_window.set_status(status)
 
     settings_window = SettingsWindow(runtime, on_settings_saved)
+    share_window = ShareWindow()
 
     icon = app.style().standardIcon(QStyle.SP_DriveNetIcon)
     floating_window.setWindowIcon(icon)
     settings_window.setWindowIcon(icon)
+    share_window.setWindowIcon(icon)
 
     tray = QSystemTrayIcon(icon, app)
     tray.setToolTip("LocalNetFTP")
 
     menu = QMenu()
+    share_action = QAction("投送模式", menu)
     settings_action = QAction("设置", menu)
     quit_action = QAction("退出", menu)
+    menu.addAction(share_action)
     menu.addAction(settings_action)
     menu.addSeparator()
     menu.addAction(quit_action)
@@ -483,6 +529,18 @@ def run_tray_app() -> int:
         settings_window.raise_()
         settings_window.activateWindow()
 
+    def show_share_window() -> None:
+        try:
+            server = runtime.start_share_server()
+            share_window.set_urls(server.urls())
+        except Exception as exc:
+            QMessageBox.warning(None, "LocalNetFTP", f"投送模式启动失败：{exc}")
+            return
+        share_window.show()
+        share_window.raise_()
+        share_window.activateWindow()
+
+    share_action.triggered.connect(show_share_window)
     settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)
 
@@ -501,6 +559,13 @@ def _current_executable() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable)
     return Path(sys.argv[0]).resolve()
+
+
+def _share_executable_path() -> Path:
+    frozen_path = Path(sys.executable)
+    if getattr(sys, "frozen", False) and frozen_path.suffix.lower() == ".exe":
+        return frozen_path
+    return Path(__file__).resolve().parents[3] / "dist" / "LocalNetFTP.exe"
 
 
 def _app_stylesheet() -> str:
