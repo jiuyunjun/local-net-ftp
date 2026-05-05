@@ -19,6 +19,7 @@ def main() -> int:
         "--enable-plugin=pyside6",
         "--include-package=flask",
         "--include-package=iroh",
+        "--include-package-data=iroh",
         "--include-package=werkzeug",
         "--include-package=jinja2",
         "--include-package=click",

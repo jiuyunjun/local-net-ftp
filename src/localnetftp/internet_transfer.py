@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import sys
 import tempfile
 import threading
 from collections.abc import Callable
@@ -9,6 +11,32 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from localnetftp.transfer import ReceiveResult, available_destination_path
+
+
+def _register_iroh_dll_directory() -> None:
+    """On Windows, add iroh's package directory to the DLL search path.
+
+    Python 3.8+ no longer searches PATH/CWD for native DLL dependencies by default.
+    When running as a Nuitka onefile exe the extraction path may be an 8.3 short-form
+    temp dir (e.g. ON0689~1), which causes LoadLibraryEx to fail resolving
+    iroh_ffi.dll's own dependencies (MSVC runtime, etc.).
+    os.add_dll_directory() fixes this without requiring any PATH changes.
+    """
+    if sys.platform != "win32" or not hasattr(os, "add_dll_directory"):
+        return
+    try:
+        import importlib.util
+
+        spec = importlib.util.find_spec("iroh")
+        if spec is None or spec.origin is None:
+            return
+        dll_dir = Path(spec.origin).parent.resolve()
+        os.add_dll_directory(str(dll_dir))
+    except Exception:
+        pass
+
+
+_register_iroh_dll_directory()
 
 
 @dataclass(frozen=True)
