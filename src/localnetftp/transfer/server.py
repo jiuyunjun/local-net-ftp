@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import socket
 import threading
+import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from localnetftp.transfer.protocol import (
@@ -15,8 +17,24 @@ from localnetftp.transfer.protocol import (
     recv_json,
     available_destination_path,
     safe_destination_path,
+    sha256_file,
     send_json,
 )
+
+
+PART_SUFFIX = ".localnetftp.part"
+PART_META_SUFFIX = ".localnetftp.part.json"
+
+
+@dataclass(frozen=True)
+class ReceivePlan:
+    relative_path: str
+    destination: Path
+    partial_path: Path
+    meta_path: Path
+    offset: int
+    size: int
+    sha256: str
 
 
 class TransferServer:
@@ -62,11 +80,17 @@ class TransferServer:
                 break
 
             threading.Thread(
-                target=self._handle_client,
+                target=self._handle_client_safely,
                 args=(client,),
                 name="LocalNetFTPTransferClient",
                 daemon=True,
             ).start()
+
+    def _handle_client_safely(self, client: socket.socket) -> None:
+        try:
+            self._handle_client(client)
+        except (ConnectionError, OSError, ValueError):
+            return
 
     def _handle_client(self, client: socket.socket) -> None:
         with client:
@@ -75,8 +99,18 @@ class TransferServer:
                 send_json(client, {"type": TRANSFER_ACK_TYPE, "accepted": False})
                 return
 
-            self._validate_manifest(request.get("items"))
-            send_json(client, {"type": TRANSFER_ACK_TYPE, "accepted": True})
+            plans = self._prepare_receive_plans(request.get("items"))
+            send_json(
+                client,
+                {
+                    "type": TRANSFER_ACK_TYPE,
+                    "accepted": True,
+                    "files": {
+                        relative_path: {"offset": plan.offset}
+                        for relative_path, plan in plans.items()
+                    },
+                },
+            )
 
             while True:
                 frame = recv_json(client)
@@ -91,20 +125,31 @@ class TransferServer:
                     size = frame.get("size")
                     if not isinstance(size, int) or size < 0:
                         raise ValueError("Transfer file size must be a non-negative integer.")
-                    destination = available_destination_path(
-                        safe_destination_path(self._receive_dir, _relative_path(frame))
-                    )
-                    recv_file_bytes(client, destination, size)
+                    relative_path = _relative_path(frame)
+                    plan = plans.get(relative_path)
+                    if plan is None:
+                        raise ValueError("Transfer file was not declared in the manifest.")
+                    offset = frame.get("offset", 0)
+                    if not isinstance(offset, int) or offset != plan.offset:
+                        raise ValueError("Transfer file offset does not match receiver state.")
+                    recv_file_bytes(client, plan.partial_path, plan.size, offset=plan.offset)
+                    _finalize_plan(plan)
                     continue
                 raise ValueError("Unsupported transfer frame type.")
 
-    def _validate_manifest(self, items: object) -> None:
+    def _prepare_receive_plans(self, items: object) -> dict[str, ReceivePlan]:
         if not isinstance(items, list):
             raise ValueError("Transfer request must contain an item list.")
+        plans: dict[str, ReceivePlan] = {}
         for item in items:
             if not isinstance(item, dict):
                 raise ValueError("Transfer manifest item must be an object.")
-            safe_destination_path(self._receive_dir, _relative_path(item))
+            relative_path = _relative_path(item)
+            safe_destination_path(self._receive_dir, relative_path)
+            if item.get("is_dir") is True:
+                continue
+            plans[relative_path] = _prepare_file_plan(self._receive_dir, item)
+        return plans
 
 
 def _relative_path(frame: dict) -> str:
@@ -112,3 +157,119 @@ def _relative_path(frame: dict) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Transfer frame must contain a relative path.")
     return value
+
+
+def _prepare_file_plan(receive_dir: Path, item: dict) -> ReceivePlan:
+    relative_path = _relative_path(item)
+    size = item.get("size")
+    if not isinstance(size, int) or size < 0:
+        raise ValueError("Transfer file size must be a non-negative integer.")
+    checksum = item.get("sha256")
+    if not isinstance(checksum, str) or len(checksum) != 64:
+        raise ValueError("Transfer file checksum must be a sha256 hex digest.")
+
+    existing_plan = _find_resumable_plan(receive_dir, relative_path, size, checksum)
+    if existing_plan is not None:
+        return existing_plan
+
+    destination = available_destination_path(safe_destination_path(receive_dir, relative_path))
+    partial_path = _partial_path_for(destination)
+    meta_path = _meta_path_for(partial_path)
+    _write_plan_meta(receive_dir, meta_path, relative_path, destination, partial_path, size, checksum)
+    return ReceivePlan(
+        relative_path=relative_path,
+        destination=destination,
+        partial_path=partial_path,
+        meta_path=meta_path,
+        offset=0,
+        size=size,
+        sha256=checksum,
+    )
+
+
+def _find_resumable_plan(receive_dir: Path, relative_path: str, size: int, checksum: str) -> ReceivePlan | None:
+    for meta_path in receive_dir.rglob(f"*{PART_META_SUFFIX}"):
+        meta = _read_plan_meta(meta_path)
+        if (
+            meta.get("relative_path") != relative_path
+            or meta.get("size") != size
+            or meta.get("sha256") != checksum
+        ):
+            continue
+
+        destination = safe_destination_path(receive_dir, str(meta.get("destination_relative_path", relative_path)))
+        partial_relative_path = meta.get("partial_path")
+        if not isinstance(partial_relative_path, str):
+            continue
+        try:
+            partial_path = safe_destination_path(receive_dir, partial_relative_path)
+        except ValueError:
+            continue
+        if not partial_path.exists():
+            continue
+        offset = partial_path.stat().st_size
+        if offset > size:
+            continue
+        if offset == size and sha256_file(partial_path) != checksum:
+            continue
+        return ReceivePlan(
+            relative_path=relative_path,
+            destination=destination,
+            partial_path=partial_path,
+            meta_path=meta_path,
+            offset=offset,
+            size=size,
+            sha256=checksum,
+        )
+    return None
+
+
+def _finalize_plan(plan: ReceivePlan) -> None:
+    if plan.partial_path.stat().st_size != plan.size:
+        raise ValueError("Received file size does not match manifest.")
+    if sha256_file(plan.partial_path) != plan.sha256:
+        raise ValueError("Received file checksum does not match manifest.")
+    plan.destination.parent.mkdir(parents=True, exist_ok=True)
+    plan.partial_path.replace(plan.destination)
+    if plan.meta_path.exists():
+        plan.meta_path.unlink()
+
+
+def _partial_path_for(destination: Path) -> Path:
+    return destination.with_name(f".{destination.name}.{uuid.uuid4().hex}{PART_SUFFIX}")
+
+
+def _meta_path_for(partial_path: Path) -> Path:
+    return partial_path.with_name(f"{partial_path.name}.json")
+
+
+def _write_plan_meta(
+    receive_dir: Path,
+    meta_path: Path,
+    relative_path: str,
+    destination: Path,
+    partial_path: Path,
+    size: int,
+    checksum: str,
+) -> None:
+    from json import dumps
+
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "relative_path": relative_path,
+        "destination_relative_path": destination.relative_to(receive_dir).as_posix(),
+        "partial_path": partial_path.relative_to(receive_dir).as_posix(),
+        "size": size,
+        "sha256": checksum,
+    }
+    meta_path.write_text(dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+
+
+def _read_plan_meta(meta_path: Path) -> dict:
+    from json import loads
+
+    try:
+        payload = loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}

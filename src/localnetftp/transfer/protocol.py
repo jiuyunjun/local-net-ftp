@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import socket
 import struct
 from dataclasses import dataclass
@@ -25,12 +26,14 @@ class TransferItem:
     relative_path: str
     is_dir: bool
     size: int = 0
+    sha256: str = ""
 
     def to_manifest_data(self) -> dict[str, Any]:
         return {
             "relative_path": self.relative_path,
             "is_dir": self.is_dir,
             "size": self.size,
+            "sha256": self.sha256,
         }
 
 
@@ -47,6 +50,7 @@ def scan_transfer_items(paths: list[Path]) -> list[TransferItem]:
                     relative_path=_posix_relative(source.name),
                     is_dir=False,
                     size=source.stat().st_size,
+                    sha256=sha256_file(source),
                 )
             )
             continue
@@ -61,6 +65,7 @@ def scan_transfer_items(paths: list[Path]) -> list[TransferItem]:
                         relative_path=relative_path,
                         is_dir=child.is_dir(),
                         size=child.stat().st_size if child.is_file() else 0,
+                        sha256=sha256_file(child) if child.is_file() else "",
                     )
                 )
             continue
@@ -89,6 +94,17 @@ def available_destination_path(path: Path, now: datetime | None = None) -> Path:
     return path.with_name(f"{path.stem}_{timestamp}{path.suffix}")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        while True:
+            chunk = file.read(CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def send_json(sock: socket.socket, payload: dict[str, Any]) -> None:
     data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     sock.sendall(struct.pack("!I", len(data)))
@@ -107,23 +123,39 @@ def recv_json(sock: socket.socket) -> dict[str, Any]:
     return payload
 
 
-def send_file_bytes(sock: socket.socket, path: Path, size: int) -> None:
-    sent = 0
+def send_file_bytes(
+    sock: socket.socket,
+    path: Path,
+    size: int,
+    *,
+    offset: int = 0,
+    on_chunk: Any = None,
+) -> None:
+    if offset < 0 or offset > size:
+        raise ValueError("Transfer offset must be within the file size.")
+
+    sent = offset
     with path.open("rb") as file:
+        file.seek(offset)
         while sent < size:
             chunk = file.read(min(CHUNK_SIZE, size - sent))
             if not chunk:
                 break
             sock.sendall(chunk)
             sent += len(chunk)
+            if on_chunk is not None:
+                on_chunk(sent)
     if sent != size:
         raise OSError(f"Failed to read complete file: {path}")
 
 
-def recv_file_bytes(sock: socket.socket, path: Path, size: int) -> None:
+def recv_file_bytes(sock: socket.socket, path: Path, size: int, *, offset: int = 0) -> None:
+    if offset < 0 or offset > size:
+        raise ValueError("Transfer offset must be within the file size.")
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    remaining = size
-    with path.open("wb") as file:
+    remaining = size - offset
+    with path.open("ab" if offset else "wb") as file:
         while remaining:
             chunk = sock.recv(min(CHUNK_SIZE, remaining))
             if not chunk:

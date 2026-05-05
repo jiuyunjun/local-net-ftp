@@ -51,11 +51,20 @@ def send_paths(
             },
         )
         ack = _expect_ack(sock)
-        if not ack:
+        if not ack.accepted:
             raise ConnectionError("Receiver rejected the transfer request.")
 
         for index, item in enumerate(items, start=1):
-            _emit(on_progress, "start", item.relative_path, index, item_count, total_bytes=item.size)
+            offset = ack.offsets.get(item.relative_path, 0)
+            _emit(
+                on_progress,
+                "start",
+                item.relative_path,
+                index,
+                item_count,
+                bytes_sent=offset,
+                total_bytes=item.size,
+            )
             if item.is_dir:
                 send_json(
                     sock,
@@ -72,9 +81,28 @@ def send_paths(
                         "type": TRANSFER_FILE_TYPE,
                         "relative_path": item.relative_path,
                         "size": item.size,
+                        "sha256": item.sha256,
+                        "offset": offset,
                     },
                 )
-                send_file_bytes(sock, item.source_path, item.size)
+                send_file_bytes(
+                    sock,
+                    item.source_path,
+                    item.size,
+                    offset=offset,
+                    on_chunk=lambda bytes_sent,
+                    relative_path=item.relative_path,
+                    item_index=index,
+                    total_size=item.size: _emit(
+                        on_progress,
+                        "progress",
+                        relative_path,
+                        item_index,
+                        item_count,
+                        bytes_sent=bytes_sent,
+                        total_bytes=total_size,
+                    ),
+                )
                 _emit(
                     on_progress,
                     "done",
@@ -88,11 +116,29 @@ def send_paths(
         send_json(sock, {"type": TRANSFER_DONE_TYPE})
 
 
-def _expect_ack(sock: socket.socket) -> bool:
+@dataclass(frozen=True)
+class TransferAck:
+    accepted: bool
+    offsets: dict[str, int]
+
+
+def _expect_ack(sock: socket.socket) -> TransferAck:
     from localnetftp.transfer.protocol import recv_json
 
     payload = recv_json(sock)
-    return payload.get("type") == TRANSFER_ACK_TYPE and payload.get("accepted") is True
+    if payload.get("type") != TRANSFER_ACK_TYPE or payload.get("accepted") is not True:
+        return TransferAck(accepted=False, offsets={})
+
+    raw_files = payload.get("files")
+    offsets: dict[str, int] = {}
+    if isinstance(raw_files, dict):
+        for relative_path, data in raw_files.items():
+            if not isinstance(relative_path, str) or not isinstance(data, dict):
+                continue
+            offset = data.get("offset")
+            if isinstance(offset, int) and offset >= 0:
+                offsets[relative_path] = offset
+    return TransferAck(accepted=True, offsets=offsets)
 
 
 def _emit(

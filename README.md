@@ -2,7 +2,7 @@
 
 LocalNetFTP is a Windows LAN file sharing tool planned in Python.
 
-Current status: tray UI, LAN discovery, file transfer, clipboard payload sending, share mode, and Nuitka exe packaging are implemented. Resume support is still planned.
+Current status: tray UI, LAN discovery, file transfer with resume and checksum verification, clipboard payload sending, share mode, and Nuitka exe packaging are implemented.
 
 ## Development
 
