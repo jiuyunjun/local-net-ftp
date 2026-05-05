@@ -13,7 +13,7 @@ from localnetftp.config import (
     set_start_on_boot,
 )
 from localnetftp.network import DiscoveryService, create_device_identity
-from localnetftp.share import DownloadShareServer
+from localnetftp.share import DownloadShareServer, ShareAddress
 from localnetftp.transfer import TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
@@ -470,18 +470,21 @@ def run_tray_app() -> int:
             layout.addWidget(self.url_list)
             self.setStyleSheet(_app_stylesheet())
 
-        def set_urls(self, urls: list[str]) -> None:
+        def set_urls(self, urls: list[ShareAddress]) -> None:
             self.url_list.clear()
             if not urls:
                 self.url_list.addItem("未找到可用局域网地址")
                 return
-            for url in urls:
-                self.url_list.addItem(url)
+            for item in urls:
+                self.url_list.addItem(f"{item.interface_name}    {item.url}")
 
         def _copy_item(self, item) -> None:
             text = item.text()
-            if text.startswith("http://"):
-                QApplication.clipboard().setText(text)
+            if "http://" not in text:
+                return
+            url = text[text.index("http://") :]
+            QApplication.clipboard().setText(url)
+            QMessageBox.information(self, "LocalNetFTP", "已复制下载地址。")
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -562,10 +565,21 @@ def _current_executable() -> Path:
 
 
 def _share_executable_path() -> Path:
-    frozen_path = Path(sys.executable)
-    if getattr(sys, "frozen", False) and frozen_path.suffix.lower() == ".exe":
-        return frozen_path
-    return Path(__file__).resolve().parents[3] / "dist" / "LocalNetFTP.exe"
+    candidates = []
+    for runtime_path in (Path(sys.executable), Path(sys.argv[0]).resolve()):
+        if runtime_path.name.lower() == "localnetftp.exe":
+            candidates.append(runtime_path)
+    candidates.extend(
+        [
+            Path.cwd() / "LocalNetFTP.exe",
+            Path.cwd() / "dist" / "LocalNetFTP.exe",
+            Path(__file__).resolve().parents[3] / "dist" / "LocalNetFTP.exe",
+        ]
+    )
+    for candidate in candidates:
+        if candidate.suffix.lower() == ".exe" and candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _app_stylesheet() -> str:
