@@ -30,4 +30,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LocalNetFTP-windows
-          path: dist/LocalNetFTP/**
+          path: dist/LocalNetFTP.exe

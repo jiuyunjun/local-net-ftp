@@ -29,3 +29,5 @@ Build exe:
 ```powershell
 python scripts/build_exe.py
 ```
+
+The exe build uses Nuitka and writes `dist/LocalNetFTP.exe`.
