@@ -2,7 +2,7 @@
 
 LocalNetFTP is a Windows LAN file sharing tool planned in Python.
 
-Current status: project scaffold only. Tray UI, LAN discovery, file transfer, resume support, and exe packaging will be implemented in later commits.
+Current status: tray UI, LAN discovery, file transfer, clipboard payload sending, share mode, and Nuitka exe packaging are implemented. Resume support is still planned.
 
 ## Development
 
@@ -18,11 +18,19 @@ Run tests:
 python -m pytest
 ```
 
-Run the placeholder app entry:
+Run the tray app:
 
 ```powershell
 python -m localnetftp
 ```
+
+Verify core transfer on one machine:
+
+```powershell
+python scripts/verify_local_transfer.py
+```
+
+This starts two loopback receivers with different ports, sends files both ways through the real transfer client/server path, and cleans up its temporary files when done.
 
 Build exe:
 
