@@ -10,19 +10,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _iroh_dll_arg() -> str:
-    """Return an include-dlls arg for iroh_ffi.dll.
-
-    iroh_ffi.py loads this DLL by path at runtime. Treating it as a DLL keeps
-    Nuitka's dependency handling active, which is more reliable than packaging
-    it as a plain data file in onefile mode.
-    """
+    """Place iroh_ffi.dll where iroh_ffi.py loads it from at runtime."""
     spec = importlib.util.find_spec("iroh")
     if spec is None or spec.origin is None:
         raise RuntimeError("iroh package not found")
     dll = Path(spec.origin).parent / "iroh_ffi.dll"
     if not dll.exists():
         raise FileNotFoundError(dll)
-    return f"--include-dlls={dll}=iroh/iroh_ffi.dll"
+    return f"--include-data-files={dll}=iroh/iroh_ffi.dll"
 
 
 def main() -> int:
@@ -34,6 +29,7 @@ def main() -> int:
         "--onefile",
         "--windows-console-mode=disable",
         "--enable-plugin=pyside6",
+        "--include-windows-runtime-dlls=auto",
         "--include-package=flask",
         "--include-package=iroh",
         _iroh_dll_arg(),  # iroh_ffi.dll must be at iroh/ so iroh_ffi.py finds it

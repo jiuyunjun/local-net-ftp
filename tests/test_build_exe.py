@@ -20,9 +20,10 @@ def test_build_exe_uses_nuitka(monkeypatch):
     assert "--onefile" in command
     assert "--standalone" in command
     assert "--enable-plugin=pyside6" in command
+    assert "--include-windows-runtime-dlls=auto" in command
     assert "--include-package=flask" in command
     assert "--include-package=iroh" in command
-    assert any(arg.startswith("--include-dlls=") and "iroh_ffi.dll" in arg for arg in command)
+    assert any(arg.startswith("--include-data-files=") and "iroh_ffi.dll" in arg for arg in command)
     assert "--include-package=werkzeug" in command
     assert "--output-filename=LocalNetFTP.exe" in command
     assert command[-1] == "src/localnetftp/__main__.py"
