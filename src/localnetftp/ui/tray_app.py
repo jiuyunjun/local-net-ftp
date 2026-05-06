@@ -121,6 +121,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         error = Signal(str)
         internet_ticket = Signal(object, object)
         internet_progress = Signal(object)
+        show_floating = Signal()
 
     class AppRuntime:
         def __init__(self) -> None:
@@ -546,24 +547,40 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             else:
                 print("LocalNetFTP: 发送完成。", file=sys.stderr)
                 self.transfer_status.setText("发送完成")
-                self._show_progress(100)
+                self._finish_progress("发送完成")
             self._update_send_button()
 
         def set_internet_progress(self, progress: InternetTransferProgress) -> None:
+            if not self.isVisible():
+                ui_events.show_floating.emit()
             if progress.bytes_total > 0:
                 percent = round(progress.bytes_done * 100 / progress.bytes_total)
                 self.transfer_status.setText(f"{progress.message} {percent}%")
-                self._show_progress(percent)
+                self._set_progress(percent)
+                if progress.stage in ("done", "peer_done"):
+                    self._finish_progress(progress.message)
                 return
             self.transfer_status.setText(progress.message)
-            if progress.stage in ("done", "serving"):
-                self._show_progress(100)
+            if progress.stage in ("done", "serving", "peer_done"):
+                self._finish_progress(progress.message)
             else:
-                self._show_progress(0)
+                self._set_progress(0)
 
         def _show_progress(self, value: int) -> None:
+            self._set_progress(value)
+
+        def _set_progress(self, value: int) -> None:
             self.transfer_progress.show()
             self.transfer_progress.setValue(max(0, min(100, value)))
+
+        def _finish_progress(self, message: str) -> None:
+            self.transfer_status.setText(message)
+            self._set_progress(100)
+            QTimer.singleShot(5000, self._reset_progress)
+
+        def _reset_progress(self) -> None:
+            self.transfer_progress.hide()
+            self.transfer_progress.setValue(0)
 
         def _refresh_peers(self) -> None:
             selected_names = set(self._selected_peer_names())
@@ -918,6 +935,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         floating_window.show()
         floating_window.raise_()
         floating_window.activateWindow()
+
+    ui_events.show_floating.connect(show_floating_window)
 
     def show_settings_window() -> None:
         settings_window.reload()
