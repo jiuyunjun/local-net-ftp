@@ -113,13 +113,19 @@ class IrohTicketProvider:
 
     async def _serve(self) -> None:
         import iroh
+        import iroh.iroh_ffi
 
+        iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
         self._emit_progress("preparing", "正在准备分享文件")
         share_path = self._prepare_share_path()
         node_dir = self._work_dir / "provider"
         node_dir.mkdir(parents=True, exist_ok=True)
         self._emit_progress("node", "正在启动 iroh 节点")
-        node = await iroh.Iroh.persistent(str(node_dir))
+        provide_callback = _ProvideCallback(self._emit_progress)
+        node = await iroh.Iroh.persistent_with_options(
+            str(node_dir),
+            iroh.NodeOptions(blob_events=provide_callback),
+        )
         try:
             callback = _AddCallback(self._emit_progress)
             self._emit_progress("adding", "正在导入文件")
@@ -132,6 +138,7 @@ class IrohTicketProvider:
             )
             if callback.hash is None or callback.format is None:
                 raise RuntimeError("Iroh did not return a shareable blob hash.")
+            provide_callback.set_hash_sizes(callback.hash_sizes)
             self._emit_progress("ticket", "正在生成 ticket")
             ticket = await node.blobs().share(
                 callback.hash,
@@ -209,7 +216,9 @@ class IrohTicketReceiver:
 
     async def _receive(self) -> None:
         import iroh
+        import iroh.iroh_ffi
 
+        iroh.iroh_ffi.uniffi_set_event_loop(asyncio.get_running_loop())
         if not self._ticket:
             raise ValueError("Ticket must not be empty.")
 
@@ -250,6 +259,7 @@ class _AddCallback:
         self._on_progress = on_progress
         self._sizes: dict[int, int] = {}
         self._offsets: dict[int, int] = {}
+        self.hash_sizes: dict[str, int] = {}
 
     async def progress(self, progress) -> None:
         import iroh
@@ -267,8 +277,74 @@ class _AddCallback:
             self.hash = done.hash
             self.format = done.format
             self._on_progress("adding", "文件导入完成", _sum_values(self._sizes), _sum_values(self._sizes))
+        if progress.type() == iroh.AddProgressType.DONE:
+            done = progress.as_done()
+            item_size = self._sizes.get(done.id, 0)
+            if item_size:
+                self.hash_sizes[str(done.hash)] = item_size
         if progress.type() == iroh.AddProgressType.ABORT:
             raise RuntimeError(progress.as_abort().error)
+
+
+class _ProvideCallback:
+    def __init__(self, on_progress: ProgressCallback) -> None:
+        self._on_progress = on_progress
+        self._hash_sizes: dict[str, int] = {}
+        self._offsets: dict[str, int] = {}
+        self._completed_bytes = 0
+        self._num_blobs = 0
+        self._completed_blobs = 0
+
+    def set_hash_sizes(self, hash_sizes: dict[str, int]) -> None:
+        self._hash_sizes = dict(hash_sizes)
+
+    async def blob_event(self, event) -> None:
+        import iroh
+
+        event_type = event.type()
+        if event_type == iroh.BlobProvideEventType.CLIENT_CONNECTED:
+            self._on_progress("peer_connected", "对方已连接")
+        elif event_type == iroh.BlobProvideEventType.GET_REQUEST_RECEIVED:
+            self._on_progress("peer_requested", "对方开始请求文件")
+        elif event_type == iroh.BlobProvideEventType.TRANSFER_HASH_SEQ_STARTED:
+            started = event.as_transfer_hash_seq_started()
+            self._num_blobs = started.num_blobs
+            self._completed_blobs = 0
+            self._completed_bytes = 0
+            self._offsets = {}
+            self._emit_transfer_progress("对方正在下载")
+        elif event_type == iroh.BlobProvideEventType.TRANSFER_PROGRESS:
+            progress = event.as_transfer_progress()
+            self._offsets[str(progress.hash)] = progress.end_offset
+            self._emit_transfer_progress("对方正在下载")
+        elif event_type == iroh.BlobProvideEventType.TRANSFER_BLOB_COMPLETED:
+            completed = event.as_transfer_blob_completed()
+            self._completed_blobs += 1
+            self._completed_bytes += completed.size
+            self._offsets.pop(str(completed.hash), None)
+            self._emit_transfer_progress("对方正在下载")
+        elif event_type == iroh.BlobProvideEventType.TRANSFER_COMPLETED:
+            total = self._estimated_total_bytes()
+            self._on_progress("peer_done", "对方下载完成", total, total)
+        elif event_type == iroh.BlobProvideEventType.TRANSFER_ABORTED:
+            total = self._estimated_total_bytes()
+            self._on_progress("peer_aborted", "对方下载中断", self._sent_bytes(), total)
+
+    def _emit_transfer_progress(self, message: str) -> None:
+        total = self._estimated_total_bytes()
+        if total > 0:
+            self._on_progress("peer_downloading", message, self._sent_bytes(), total)
+            return
+        if self._num_blobs:
+            self._on_progress("peer_downloading", f"{message} {self._completed_blobs}/{self._num_blobs}")
+            return
+        self._on_progress("peer_downloading", message)
+
+    def _sent_bytes(self) -> int:
+        return self._completed_bytes + _sum_values(self._offsets)
+
+    def _estimated_total_bytes(self) -> int:
+        return _sum_values(self._hash_sizes)
 
 
 class _DownloadCallback:
