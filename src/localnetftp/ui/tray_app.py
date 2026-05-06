@@ -16,7 +16,12 @@ from localnetftp.config import (
     save_config,
     set_start_on_boot,
 )
-from localnetftp.internet_transfer import IrohTicketProvider, IrohTicketReceiver, InternetTicket
+from localnetftp.internet_transfer import (
+    IrohTicketProvider,
+    IrohTicketReceiver,
+    InternetTicket,
+    InternetTransferProgress,
+)
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
 from localnetftp.transfer import ReceiveResult, TransferProgress, TransferServer, send_paths
@@ -73,6 +78,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         QPushButton,
         QInputDialog,
         QPlainTextEdit,
+        QProgressBar,
         QStyle,
         QSystemTrayIcon,
         QVBoxLayout,
@@ -114,6 +120,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         received = Signal(object)
         error = Signal(str)
         internet_ticket = Signal(object, object)
+        internet_progress = Signal(object)
 
     class AppRuntime:
         def __init__(self) -> None:
@@ -251,6 +258,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 work_dir=self.config_dir / "iroh",
                 on_ticket=lambda ticket: ui_events.internet_ticket.emit(provider, ticket),
                 on_error=lambda error: ui_events.error.emit(f"Iroh 发送失败：{error}"),
+                on_progress=lambda progress: ui_events.internet_progress.emit(progress),
             )
             self.internet_providers.append(provider)
             provider.start()
@@ -272,6 +280,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 work_dir=self.config_dir / "iroh",
                 on_received=lambda result: ui_events.received.emit(result),
                 on_error=lambda error: ui_events.error.emit(f"Iroh 接收失败：{error}"),
+                on_progress=lambda progress: ui_events.internet_progress.emit(progress),
             )
             self.internet_receivers.append(receiver)
             receiver.start()
@@ -307,6 +316,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.paste_input = PasteInput(self._paste_clipboard)
             self.transfer_status = QLabel("")
             self.transfer_status.setObjectName("transferStatus")
+            self.transfer_progress = QProgressBar()
+            self.transfer_progress.setObjectName("transferProgress")
+            self.transfer_progress.setRange(0, 100)
+            self.transfer_progress.setValue(0)
+            self.transfer_progress.hide()
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(8, 8, 8, 8)
@@ -315,6 +329,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.addWidget(self.peer_list, 1)
             layout.addWidget(self.paste_input)
             layout.addWidget(self.transfer_status)
+            layout.addWidget(self.transfer_progress)
 
             self.setStyleSheet(_floating_stylesheet())
 
@@ -460,6 +475,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
             if internet_selected:
                 self.transfer_status.setText("正在生成公网 ticket...")
+                self._show_progress(0)
                 self._runtime.start_internet_provider(paths)
 
             if peers:
@@ -502,10 +518,15 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def _send_progress(self, peer_name: str, progress: TransferProgress) -> None:
             QTimer.singleShot(
                 0,
-                lambda: self.transfer_status.setText(
-                    f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path}"
-                ),
+                lambda: self._set_lan_progress(peer_name, progress),
             )
+
+        def _set_lan_progress(self, peer_name: str, progress: TransferProgress) -> None:
+            self.transfer_status.setText(
+                f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path}"
+            )
+            if progress.total_bytes > 0:
+                self._show_progress(round(progress.bytes_sent * 100 / progress.total_bytes))
 
         def _send_finished(self, peer_name: str, failed: bool, error_message: str = "") -> None:
             with self._send_lock:
@@ -525,7 +546,24 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             else:
                 print("LocalNetFTP: 发送完成。", file=sys.stderr)
                 self.transfer_status.setText("发送完成")
+                self._show_progress(100)
             self._update_send_button()
+
+        def set_internet_progress(self, progress: InternetTransferProgress) -> None:
+            if progress.bytes_total > 0:
+                percent = round(progress.bytes_done * 100 / progress.bytes_total)
+                self.transfer_status.setText(f"{progress.message} {percent}%")
+                self._show_progress(percent)
+                return
+            self.transfer_status.setText(progress.message)
+            if progress.stage in ("done", "serving"):
+                self._show_progress(100)
+            else:
+                self._show_progress(0)
+
+        def _show_progress(self, value: int) -> None:
+            self.transfer_progress.show()
+            self.transfer_progress.setValue(max(0, min(100, value)))
 
         def _refresh_peers(self) -> None:
             selected_names = set(self._selected_peer_names())
@@ -787,6 +825,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     ui_events.received.connect(show_received_prompt)
     ui_events.error.connect(show_error_message)
     ui_events.internet_ticket.connect(show_ticket_window)
+    ui_events.internet_progress.connect(lambda progress: floating_window.set_internet_progress(progress))
 
     runtime = AppRuntime()
     startup_status = runtime.start()
@@ -1023,6 +1062,18 @@ def _floating_stylesheet() -> str:
         color: #536173;
         font-size: 11px;
         min-height: 18px;
+    }
+    QProgressBar#transferProgress {
+        min-height: 6px;
+        max-height: 6px;
+        border: 0;
+        border-radius: 3px;
+        background-color: rgba(210, 218, 228, 190);
+        text-align: center;
+    }
+    QProgressBar#transferProgress::chunk {
+        border-radius: 3px;
+        background-color: #2f7dd1;
     }
     QListWidget {
         min-height: 180px;

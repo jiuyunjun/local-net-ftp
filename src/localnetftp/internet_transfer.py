@@ -57,9 +57,18 @@ class InternetTicket:
     ticket: str
 
 
+@dataclass(frozen=True)
+class InternetTransferProgress:
+    stage: str
+    message: str
+    bytes_done: int = 0
+    bytes_total: int = 0
+
+
 TicketCallback = Callable[[InternetTicket], None]
 ReceiveCallback = Callable[[ReceiveResult], None]
 ErrorCallback = Callable[[str], None]
+ProgressCallback = Callable[[InternetTransferProgress], None]
 
 
 class IrohTicketProvider:
@@ -70,11 +79,13 @@ class IrohTicketProvider:
         work_dir: Path,
         on_ticket: TicketCallback,
         on_error: ErrorCallback,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self._paths = [path.resolve() for path in paths]
         self._work_dir = work_dir
         self._on_ticket = on_ticket
         self._on_error = on_error
+        self._on_progress = on_progress
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
@@ -102,12 +113,15 @@ class IrohTicketProvider:
     async def _serve(self) -> None:
         import iroh
 
+        self._emit_progress("preparing", "正在准备分享文件")
         share_path = self._prepare_share_path()
         node_dir = self._work_dir / "provider"
         node_dir.mkdir(parents=True, exist_ok=True)
+        self._emit_progress("node", "正在启动 iroh 节点")
         node = await iroh.Iroh.persistent(str(node_dir))
         try:
-            callback = _AddCallback()
+            callback = _AddCallback(self._emit_progress)
+            self._emit_progress("adding", "正在导入文件")
             await node.blobs().add_from_path(
                 str(share_path),
                 False,
@@ -117,12 +131,14 @@ class IrohTicketProvider:
             )
             if callback.hash is None or callback.format is None:
                 raise RuntimeError("Iroh did not return a shareable blob hash.")
+            self._emit_progress("ticket", "正在生成 ticket")
             ticket = await node.blobs().share(
                 callback.hash,
                 callback.format,
                 iroh.AddrInfoOptions.RELAY_AND_ADDRESSES,
             )
             self._on_ticket(InternetTicket(str(ticket)))
+            self._emit_progress("serving", "ticket 已生成，等待对方下载")
             while not self._stop_event.is_set():
                 await asyncio.sleep(0.2)
         finally:
@@ -148,6 +164,16 @@ class IrohTicketProvider:
                 shutil.copy2(source, destination)
         return staging_dir
 
+    def _emit_progress(
+        self,
+        stage: str,
+        message: str,
+        bytes_done: int = 0,
+        bytes_total: int = 0,
+    ) -> None:
+        if self._on_progress is not None:
+            self._on_progress(InternetTransferProgress(stage, message, bytes_done, bytes_total))
+
 
 class IrohTicketReceiver:
     def __init__(
@@ -158,12 +184,14 @@ class IrohTicketReceiver:
         work_dir: Path,
         on_received: ReceiveCallback,
         on_error: ErrorCallback,
+        on_progress: ProgressCallback | None = None,
     ) -> None:
         self._ticket = ticket.strip()
         self._receive_dir = receive_dir
         self._work_dir = work_dir
         self._on_received = on_received
         self._on_error = on_error
+        self._on_progress = on_progress
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
@@ -187,40 +215,88 @@ class IrohTicketReceiver:
         node_dir = self._work_dir / "receiver"
         node_dir.mkdir(parents=True, exist_ok=True)
         export_temp = tempfile.TemporaryDirectory(prefix="localnetftp-iroh-recv-")
+        self._emit_progress("node", "正在启动 iroh 节点")
         node = await iroh.Iroh.persistent(str(node_dir))
         try:
+            self._emit_progress("ticket", "正在解析 ticket")
             ticket = iroh.BlobTicket(self._ticket)
-            await node.blobs().download(ticket.hash(), ticket.as_download_options(), _DownloadCallback())
+            self._emit_progress("connecting", "正在连接对方")
+            await node.blobs().download(ticket.hash(), ticket.as_download_options(), _DownloadCallback(self._emit_progress))
+            self._emit_progress("exporting", "正在保存到接收目录")
             exported_paths = await _export_ticket(node, ticket, Path(export_temp.name))
             saved_paths = _move_exported_paths(exported_paths, self._receive_dir)
+            self._emit_progress("done", "接收完成")
             self._on_received(ReceiveResult(saved_paths))
         finally:
             await node.node().shutdown()
             export_temp.cleanup()
 
+    def _emit_progress(
+        self,
+        stage: str,
+        message: str,
+        bytes_done: int = 0,
+        bytes_total: int = 0,
+    ) -> None:
+        if self._on_progress is not None:
+            self._on_progress(InternetTransferProgress(stage, message, bytes_done, bytes_total))
+
 
 class _AddCallback:
-    def __init__(self) -> None:
+    def __init__(self, on_progress: ProgressCallback) -> None:
         self.hash = None
         self.format = None
+        self._on_progress = on_progress
+        self._sizes: dict[int, int] = {}
+        self._offsets: dict[int, int] = {}
 
     async def progress(self, progress) -> None:
         import iroh
 
+        if progress.type() == iroh.AddProgressType.FOUND:
+            found = progress.as_found()
+            self._sizes[found.id] = found.size
+            self._on_progress("adding", f"正在导入 {found.name}", _sum_values(self._offsets), _sum_values(self._sizes))
+        if progress.type() == iroh.AddProgressType.PROGRESS:
+            item_progress = progress.as_progress()
+            self._offsets[item_progress.id] = item_progress.offset
+            self._on_progress("adding", "正在导入文件", _sum_values(self._offsets), _sum_values(self._sizes))
         if progress.type() == iroh.AddProgressType.ALL_DONE:
             done = progress.as_all_done()
             self.hash = done.hash
             self.format = done.format
+            self._on_progress("adding", "文件导入完成", _sum_values(self._sizes), _sum_values(self._sizes))
         if progress.type() == iroh.AddProgressType.ABORT:
             raise RuntimeError(progress.as_abort().error)
 
 
 class _DownloadCallback:
+    def __init__(self, on_progress: ProgressCallback) -> None:
+        self._on_progress = on_progress
+        self._sizes: dict[int, int] = {}
+        self._offsets: dict[int, int] = {}
+
     async def progress(self, progress) -> None:
         import iroh
 
+        if progress.type() == iroh.DownloadProgressType.CONNECTED:
+            self._on_progress("downloading", "已连接，正在接收")
+        if progress.type() == iroh.DownloadProgressType.FOUND:
+            found = progress.as_found()
+            self._sizes[found.id] = found.size
+            self._on_progress("downloading", "正在接收文件", _sum_values(self._offsets), _sum_values(self._sizes))
+        if progress.type() == iroh.DownloadProgressType.PROGRESS:
+            item_progress = progress.as_progress()
+            self._offsets[item_progress.id] = item_progress.offset
+            self._on_progress("downloading", "正在接收文件", _sum_values(self._offsets), _sum_values(self._sizes))
+        if progress.type() == iroh.DownloadProgressType.ALL_DONE:
+            self._on_progress("downloading", "下载完成", _sum_values(self._sizes), _sum_values(self._sizes))
         if progress.type() == iroh.DownloadProgressType.ABORT:
             raise RuntimeError(progress.as_abort().error)
+
+
+def _sum_values(values: dict[int, int]) -> int:
+    return sum(values.values())
 
 
 async def _export_ticket(node, ticket, export_dir: Path) -> list[Path]:
