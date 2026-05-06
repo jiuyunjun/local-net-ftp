@@ -703,6 +703,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             label = QLabel("把这个 ticket 发给对方。窗口关闭前，文件会保持可下载。")
             self.ticket_text = QPlainTextEdit(ticket.ticket)
             self.ticket_text.setReadOnly(True)
+            self.status = QLabel("ticket 已生成，等待对方下载")
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(100)
 
             copy_button = QPushButton("复制 ticket")
             copy_button.clicked.connect(self._copy_ticket)
@@ -716,8 +720,14 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout = QVBoxLayout(self)
             layout.addWidget(label)
             layout.addWidget(self.ticket_text, 1)
+            layout.addWidget(self.status)
+            layout.addWidget(self.progress)
             layout.addLayout(button_layout)
             self.setStyleSheet(_app_stylesheet())
+
+        def set_progress(self, progress: InternetTransferProgress) -> None:
+            self.status.setText(_internet_progress_text(progress))
+            self.progress.setValue(_internet_progress_percent(progress))
 
         def _copy_ticket(self) -> None:
             QApplication.clipboard().setText(self.ticket_text.toPlainText())
@@ -725,6 +735,28 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
             self._runtime.stop_internet_provider(self._provider)
             super().closeEvent(event)
+
+    class ReceiveProgressWindow(QWidget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setWindowTitle("接收 ticket 文件")
+            self.setMinimumSize(420, 120)
+
+            self.status = QLabel("正在准备接收")
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(self.status)
+            layout.addWidget(self.progress)
+            self.setStyleSheet(_app_stylesheet())
+
+        def set_progress(self, progress: InternetTransferProgress) -> None:
+            self.status.setText(_internet_progress_text(progress))
+            self.progress.setValue(_internet_progress_percent(progress))
+            if progress.stage == "done":
+                QTimer.singleShot(1600, self.close)
 
     class ReceiveToast(QWidget):
         def __init__(self, result: ReceiveResult) -> None:
@@ -806,6 +838,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         toast.show_near_tray(app)
 
     ticket_windows: list[TicketWindow] = []
+    receive_progress_windows: list[ReceiveProgressWindow] = []
 
     def show_ticket_window(provider: IrohTicketProvider, ticket: InternetTicket) -> None:
         floating_window.transfer_status.setText("公网 ticket 已生成")
@@ -816,6 +849,26 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.raise_()
         window.activateWindow()
 
+    def show_receive_progress_window() -> ReceiveProgressWindow:
+        window = ReceiveProgressWindow()
+        receive_progress_windows.append(window)
+        window.destroyed.connect(
+            lambda: receive_progress_windows.remove(window) if window in receive_progress_windows else None
+        )
+        window.show()
+        window.raise_()
+        window.activateWindow()
+        return window
+
+    def handle_internet_progress(progress: InternetTransferProgress) -> None:
+        floating_window.set_internet_progress(progress)
+        if progress.role == "send":
+            for window in list(ticket_windows):
+                window.set_progress(progress)
+            return
+        for window in list(receive_progress_windows):
+            window.set_progress(progress)
+
     def show_error_message(message: str) -> None:
         QMessageBox.warning(None, "LocalNetFTP", message)
 
@@ -825,7 +878,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     ui_events.received.connect(show_received_prompt)
     ui_events.error.connect(show_error_message)
     ui_events.internet_ticket.connect(show_ticket_window)
-    ui_events.internet_progress.connect(lambda progress: floating_window.set_internet_progress(progress))
+    ui_events.internet_progress.connect(handle_internet_progress)
 
     runtime = AppRuntime()
     startup_status = runtime.start()
@@ -886,6 +939,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     def receive_ticket() -> None:
         ticket, accepted = QInputDialog.getMultiLineText(None, "输入 ticket", "粘贴对方发来的 ticket：")
         if accepted and ticket.strip():
+            show_receive_progress_window()
             runtime.receive_internet_ticket(ticket)
 
     share_action.triggered.connect(show_share_window)
@@ -956,6 +1010,21 @@ def _open_received_item(paths: list[Path]) -> None:
 
 def _open_path(path: Path) -> None:
     os.startfile(path)  # type: ignore[attr-defined]
+
+
+def _internet_progress_percent(progress: InternetTransferProgress) -> int:
+    if progress.bytes_total > 0:
+        return max(0, min(100, round(progress.bytes_done * 100 / progress.bytes_total)))
+    if progress.stage in ("done", "serving"):
+        return 100
+    return 0
+
+
+def _internet_progress_text(progress: InternetTransferProgress) -> str:
+    percent = _internet_progress_percent(progress)
+    if progress.bytes_total > 0:
+        return f"{progress.message} {percent}%"
+    return progress.message
 
 
 def _toast_stylesheet() -> str:

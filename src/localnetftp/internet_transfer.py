@@ -59,6 +59,7 @@ class InternetTicket:
 
 @dataclass(frozen=True)
 class InternetTransferProgress:
+    role: str
     stage: str
     message: str
     bytes_done: int = 0
@@ -172,7 +173,7 @@ class IrohTicketProvider:
         bytes_total: int = 0,
     ) -> None:
         if self._on_progress is not None:
-            self._on_progress(InternetTransferProgress(stage, message, bytes_done, bytes_total))
+            self._on_progress(InternetTransferProgress("send", stage, message, bytes_done, bytes_total))
 
 
 class IrohTicketReceiver:
@@ -239,7 +240,7 @@ class IrohTicketReceiver:
         bytes_total: int = 0,
     ) -> None:
         if self._on_progress is not None:
-            self._on_progress(InternetTransferProgress(stage, message, bytes_done, bytes_total))
+            self._on_progress(InternetTransferProgress("receive", stage, message, bytes_done, bytes_total))
 
 
 class _AddCallback:
