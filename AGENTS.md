@@ -54,15 +54,36 @@
 - 本项目应使用 Git 管理。
 - 每次完成一次明确修改后生成一个 Git commit；如果当前目录还不是 Git 仓库，先询问用户是否初始化。
 - 不要自动 `git push`，除非用户明确要求。
-- 每次 commit 应触发 exe 打包。优先通过 GitHub Actions 的 push/PR 工作流打包；如只在本地开发，则提供等价的本地打包脚本。
+- 每次 commit 后必须立即本地打包 exe：`python scripts/build_exe.py`。如果打包失败，继续修复并追加新的 commit，直到打包成功。
+- 每次 commit 后必须同时启动正式版和 debug 版做冒烟验证：
+  - 正式版：启动 `dist/LocalNetFTP.exe`，等待数秒确认进程仍在运行，然后关闭该进程。
+  - debug 版：启动 `dist/LocalNetFTP.exe --dev-instance DEBUG`，等待数秒确认进程仍在运行，然后关闭该进程。
+  - 如果本地源码调试更合适，可额外运行 `python scripts/start_debug_client.py DEBUG`，但不能替代 exe 的 debug 启动验证。
+- 每次本地验证完成后，最终回复必须明确说明测试结果、commit hash、exe 路径、正式版启动验证、debug 版启动验证和 git 状态。
 - 打包产物不要提交进源码仓库，除非用户明确要求发布二进制文件。
 
 推荐后续命令占位：
 - 安装依赖：`python -m pip install -r requirements-dev.txt`
 - 运行测试：`python -m pytest`
 - 打包 exe：`python scripts/build_exe.py`
+- 启动 debug 客户端：`python scripts/start_debug_client.py DEBUG`
+- 启动双开验证：`python scripts/start_dev_pair.py`
 
 命令不存在时，先创建或更新相应脚本，再更新本文件。
+
+## 固定完成标准
+
+每次代码或文档修改完成前，至少执行：
+- `python -m pytest`
+- `python scripts/verify_local_transfer.py`
+- `git status --short`
+
+每次生成 commit 后，额外执行：
+- `python scripts/build_exe.py`
+- 正式版 exe 冒烟启动：`dist/LocalNetFTP.exe`
+- debug 版 exe 冒烟启动：`dist/LocalNetFTP.exe --dev-instance DEBUG`
+
+涉及 iroh、公网 ticket、Nuitka 打包或 DLL 加载时，还必须做一次 iroh ticket 本机烟测：生成 ticket、接收 ticket、确认文件保存成功。若因为网络环境限制无法验证公网链路，必须在最终回复中明确说明限制和已完成的本机验证范围。
 
 ## 测试和验收
 
