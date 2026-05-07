@@ -63,7 +63,7 @@ def _dev_transfer_port(instance_name: str) -> int:
 
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
-    from PySide6.QtCore import QObject, QTimer, Qt, Signal
+    from PySide6.QtCore import QObject, QPoint, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QKeySequence, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -804,9 +804,12 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
             self.setFixedWidth(340)
+            self._drag_offset: QPoint | None = None
+            self._manually_moved = False
 
             title = QLabel("收到文件")
             title.setObjectName("toastTitle")
+            title.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             close_button = QPushButton("×")
             close_button.setObjectName("toastClose")
             close_button.setToolTip("关闭")
@@ -820,6 +823,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             message = QLabel(_received_message(self.paths))
             message.setObjectName("toastMessage")
             message.setWordWrap(True)
+            message.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             preview_widget = self._preview_widget()
 
             open_folder = QPushButton("打开保存位置")
@@ -853,6 +857,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 preview = QLabel()
                 preview.setObjectName("toastImagePreview")
                 preview.setAlignment(Qt.AlignCenter)
+                preview.setAttribute(Qt.WA_TransparentForMouseEvents, True)
                 preview.setPixmap(pixmap.scaled(316, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 return preview
             if _is_text_preview_path(path):
@@ -876,6 +881,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             return None
 
         def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
+            if self._manually_moved:
+                self.show()
+                return
             screen = app.primaryScreen()
             if screen is None:
                 self.show()
@@ -888,6 +896,25 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             y = geometry.bottom() - self.height() - margin - stack_index * (self.height() + gap)
             self.move(max(geometry.left(), x), max(geometry.top(), y))
             self.show()
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.button() == Qt.LeftButton:
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.buttons() & Qt.LeftButton and self._drag_offset is not None:
+                self._manually_moved = True
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._drag_offset = None
+            super().mouseReleaseEvent(event)
 
         def _open_save_location(self) -> None:
             _open_save_location(self.paths)
