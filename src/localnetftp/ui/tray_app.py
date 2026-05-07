@@ -76,7 +76,6 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         QMenu,
         QMessageBox,
         QPushButton,
-        QInputDialog,
         QPlainTextEdit,
         QProgressBar,
         QStyle,
@@ -684,13 +683,18 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._runtime = runtime
             self._provider = provider
             self.setWindowTitle("公网 ticket")
-            self.setMinimumSize(560, 260)
+            self.setMinimumSize(560, 300)
 
+            title = QLabel("公网 ticket")
+            title.setObjectName("titleLabel")
             label = QLabel("把这个 ticket 发给对方。窗口关闭前，文件会保持可下载。")
+            label.setObjectName("mutedLabel")
             self.ticket_text = QPlainTextEdit(ticket.ticket)
             self.ticket_text.setReadOnly(True)
             self.status = QLabel("ticket 已生成，等待对方下载")
+            self.status.setObjectName("statusLabel")
             self.progress = QProgressBar()
+            self.progress.setObjectName("inlineProgress")
             self.progress.setRange(0, 100)
             self.progress.setValue(100)
 
@@ -704,6 +708,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             button_layout.addWidget(close_button)
 
             layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            layout.addWidget(title)
             layout.addWidget(label)
             layout.addWidget(self.ticket_text, 1)
             layout.addWidget(self.status)
@@ -717,9 +724,57 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def _copy_ticket(self) -> None:
             QApplication.clipboard().setText(self.ticket_text.toPlainText())
+            self.status.setText("已复制 ticket")
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
             self._runtime.stop_internet_provider(self._provider)
+            super().closeEvent(event)
+
+    class TicketInputWindow(QWidget):
+        def __init__(self, on_submit) -> None:
+            super().__init__()
+            self._on_submit = on_submit
+            self.setWindowTitle("输入 ticket")
+            self.setMinimumSize(520, 260)
+
+            title = QLabel("输入 ticket")
+            title.setObjectName("titleLabel")
+            label = QLabel("粘贴对方发来的 ticket")
+            label.setObjectName("mutedLabel")
+            self.ticket_text = QPlainTextEdit()
+            self.ticket_text.setPlaceholderText("ticket")
+            self.status = QLabel("")
+            self.status.setObjectName("statusLabel")
+
+            receive_button = QPushButton("开始接收")
+            receive_button.clicked.connect(self._submit)
+            close_button = QPushButton("取消")
+            close_button.clicked.connect(self.close)
+
+            button_layout = QHBoxLayout()
+            button_layout.addStretch(1)
+            button_layout.addWidget(receive_button)
+            button_layout.addWidget(close_button)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            layout.addWidget(title)
+            layout.addWidget(label)
+            layout.addWidget(self.ticket_text, 1)
+            layout.addWidget(self.status)
+            layout.addLayout(button_layout)
+            self.setStyleSheet(_app_stylesheet())
+
+        def _submit(self) -> None:
+            ticket = self.ticket_text.toPlainText().strip()
+            if not ticket:
+                self.status.setText("请先粘贴 ticket")
+                return
+            self._on_submit(ticket)
+            self.close()
+
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
             super().closeEvent(event)
 
     class ReceiveProgressWindow(QWidget):
@@ -1101,6 +1156,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         return toast
 
     ticket_windows: list[TicketWindow] = []
+    ticket_input_windows: list[TicketInputWindow] = []
     receive_progress_windows: list[ReceiveProgressWindow] = []
     send_windows: list[SendProgressWindow] = []
 
@@ -1196,6 +1252,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window = TicketWindow(runtime, provider, ticket)
         ticket_windows.append(window)
         window.destroyed.connect(lambda: ticket_windows.remove(window) if window in ticket_windows else None)
+        window.setWindowIcon(icon)
         window.show()
         window.raise_()
         window.activateWindow()
@@ -1210,6 +1267,21 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.raise_()
         window.activateWindow()
         return window
+
+    def show_ticket_input_window() -> None:
+        def submit(ticket: str) -> None:
+            show_internet_receive_toast()
+            runtime.receive_internet_ticket(ticket)
+
+        window = TicketInputWindow(submit)
+        ticket_input_windows.append(window)
+        window.destroyed.connect(
+            lambda *_: ticket_input_windows.remove(window) if window in ticket_input_windows else None
+        )
+        window.setWindowIcon(icon)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def handle_internet_progress(progress: InternetTransferProgress) -> None:
         floating_window.set_internet_progress(progress)
@@ -1295,10 +1367,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         share_window.activateWindow()
 
     def receive_ticket() -> None:
-        ticket, accepted = QInputDialog.getMultiLineText(None, "输入 ticket", "粘贴对方发来的 ticket：")
-        if accepted and ticket.strip():
-            show_internet_receive_toast()
-            runtime.receive_internet_ticket(ticket)
+        show_ticket_input_window()
 
     share_action.triggered.connect(show_share_window)
     receive_ticket_action.triggered.connect(receive_ticket)
@@ -1583,16 +1652,45 @@ def _app_stylesheet() -> str:
         font-size: 22px;
         font-weight: 600;
     }
+    QLabel#mutedLabel,
+    QLabel#statusLabel {
+        color: #536173;
+    }
     QLineEdit {
         min-height: 28px;
         padding: 3px 6px;
     }
+    QPlainTextEdit {
+        padding: 8px;
+        border: 1px solid rgba(148, 163, 184, 150);
+        border-radius: 6px;
+        background-color: rgba(255, 255, 255, 245);
+        selection-background-color: #bfdbfe;
+    }
     QListWidget {
         min-height: 120px;
+    }
+    QProgressBar#inlineProgress {
+        min-height: 8px;
+        max-height: 8px;
+        border: 0;
+        border-radius: 4px;
+        background-color: rgba(210, 218, 228, 190);
+        text-align: center;
+    }
+    QProgressBar#inlineProgress::chunk {
+        border-radius: 4px;
+        background-color: #2f7dd1;
     }
     QPushButton {
         min-height: 30px;
         padding: 3px 14px;
+        border-radius: 5px;
+        border: 1px solid #9aa8ba;
+        background-color: rgba(255, 255, 255, 240);
+    }
+    QPushButton:hover {
+        background-color: #eef5ff;
     }
     """
 
