@@ -59,8 +59,8 @@
   - `scripts/build_exe.bat`
   - 或 `python scripts/build_exe.py`
 - 每次完成代码或文档修改后必须同时启动 Python 正式版和 Python debug 版做冒烟验证：
-  - 正式版：启动 `python -m localnetftp`，等待数秒确认进程仍在运行，然后关闭该进程。
-  - debug 版：启动 `python -m localnetftp --dev-instance DEBUG`，等待数秒确认进程仍在运行，然后关闭该进程。
+  - 正式版：启动 `python -m localnetftp`，等待数秒确认进程仍在运行，不要关闭该进程。
+  - debug 版：启动 `python -m localnetftp --dev-instance DEBUG`，等待数秒确认进程仍在运行，不要关闭该进程。
   - 如需手动 debug，可额外运行 `python scripts/start_debug_client.py DEBUG`。
 - 每次本地验证完成后，最终回复必须明确说明测试结果、commit hash、Python 正式版启动验证、Python debug 版启动验证和 git 状态。若本轮执行了打包，再额外说明 exe 路径和 exe 冒烟结果。
 - 打包产物不要提交进源码仓库，除非用户明确要求发布二进制文件。
@@ -84,6 +84,7 @@
 每次生成 commit 后，额外执行：
 - Python 正式版冒烟启动：`python -m localnetftp`
 - Python debug 版冒烟启动：`python -m localnetftp --dev-instance DEBUG`
+- 冒烟启动后的进程必须保持运行，除非用户明确要求关闭。
 
 不要在每次 commit 后自动执行 Nuitka 打包。需要打包时手动运行：
 - `scripts/build_exe.bat`
