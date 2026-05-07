@@ -124,6 +124,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     class UiEvents(QObject):
         received = Signal(object)
         receive_progress = Signal(object)
+        send_progress = Signal(object, object, str)
+        send_finished = Signal(object, str, bool, bool, str)
         error = Signal(str)
         internet_ticket = Signal(object, object)
         internet_progress = Signal(object)
@@ -300,9 +302,6 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._runtime = runtime
             self._peers_by_row = {}
             self._internet_row: int | None = None
-            self._active_send_count = 0
-            self._send_failures: list[str] = []
-            self._send_lock = threading.Lock()
 
             self.setWindowTitle("LocalNetFTP")
             self.setMinimumSize(260, 220)
@@ -501,42 +500,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self._runtime.start_internet_provider(paths)
 
             if peers:
-                with self._send_lock:
-                    self._active_send_count = len(peers)
-                    self._send_failures = []
-
                 print(f"LocalNetFTP: {send_summary(peer_names, paths)}", file=sys.stderr)
                 self._update_send_button()
                 for peer in peers:
                     start_send_task(peer, list(paths))
-
-        def _send_to_peer(self, peer, paths: list[Path]) -> None:
-            failed = False
-            error_message = ""
-            try:
-                send_paths(
-                    peer.address,
-                    peer.identity.listen_port,
-                    paths,
-                    on_progress=lambda progress: self._send_progress(peer.identity.device_name, progress),
-                )
-            except Exception as exc:
-                failed = True
-                error_message = str(exc)
-                print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
-                with self._send_lock:
-                    self._send_failures.append(peer.identity.device_name)
-            finally:
-                QTimer.singleShot(
-                    0,
-                    lambda: self._send_finished(peer.identity.device_name, failed, error_message),
-                )
-
-        def _send_progress(self, peer_name: str, progress: TransferProgress) -> None:
-            QTimer.singleShot(
-                0,
-                lambda: self._set_lan_progress(peer_name, progress),
-            )
 
         def _set_lan_progress(self, peer_name: str, progress: TransferProgress) -> None:
             if progress.total_bytes > 0:
@@ -550,27 +517,6 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path}"
             )
             self._show_progress(0)
-
-        def _send_finished(self, peer_name: str, failed: bool, error_message: str = "") -> None:
-            with self._send_lock:
-                self._active_send_count = max(0, self._active_send_count - 1)
-                active_send_count = self._active_send_count
-                failures = list(self._send_failures)
-
-            if active_send_count:
-                return
-
-            if failures:
-                print(f"LocalNetFTP: 发送完成，失败：{'、'.join(failures)}", file=sys.stderr)
-                self.transfer_status.setText(f"失败：{'、'.join(failures)} {error_message}".strip())
-            elif failed:
-                print(f"LocalNetFTP: 发送到 {peer_name} 失败。", file=sys.stderr)
-                self.transfer_status.setText(f"{peer_name} 失败：{error_message}")
-            else:
-                print("LocalNetFTP: 发送完成。", file=sys.stderr)
-                self.transfer_status.setText("发送完成")
-                self._finish_progress("发送完成")
-            self._update_send_button()
 
         def set_internet_progress(self, progress: InternetTransferProgress) -> None:
             if not self.isVisible():
@@ -784,6 +730,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
             self.status = QLabel("正在准备接收")
             self.progress = QProgressBar()
+            self.progress.setObjectName("toastProgress")
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
 
@@ -806,14 +753,25 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._on_cancel = on_cancel
             self._on_retry = on_retry
             self.setWindowTitle("发送文件")
-            self.setMinimumSize(380, 132)
+            self.setWindowFlag(Qt.Tool, True)
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            self.setAttribute(Qt.WA_DeleteOnClose, True)
+            self.setFixedWidth(340)
+            self._drag_offset: QPoint | None = None
+            self._manually_moved = False
 
             self.status = QLabel(f"正在发送给 {peer_name}")
+            self.status.setObjectName("toastTitle")
+            self.status.setWordWrap(True)
+            self.status.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self.detail = QLabel(_send_items_text(paths))
-            self.detail.setObjectName("transferDetail")
+            self.detail.setObjectName("toastMessage")
             self.detail.setWordWrap(True)
+            self.detail.setAttribute(Qt.WA_TransparentForMouseEvents, True)
             self.progress = QProgressBar()
+            self.progress.setObjectName("toastProgress")
             self.progress.setRange(0, 100)
             self.progress.setValue(0)
             self.cancel_button = QPushButton("取消")
@@ -828,11 +786,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             button_layout.addWidget(self.cancel_button)
 
             layout = QVBoxLayout(self)
+            layout.setContentsMargins(12, 10, 12, 12)
+            layout.setSpacing(8)
             layout.addWidget(self.status)
             layout.addWidget(self.detail)
             layout.addWidget(self.progress)
             layout.addLayout(button_layout)
-            self.setStyleSheet(_app_stylesheet())
+            self.setStyleSheet(_toast_stylesheet())
 
         def set_progress(self, progress: TransferProgress) -> None:
             percent = _transfer_progress_percent(progress.bytes_sent, progress.total_bytes)
@@ -866,6 +826,42 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def _retry(self) -> None:
             self.close()
             self._on_retry()
+
+        def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
+            if self._manually_moved:
+                self.show()
+                return
+            screen = app.primaryScreen()
+            if screen is None:
+                self.show()
+                return
+            self.adjustSize()
+            geometry = screen.availableGeometry()
+            margin = 16
+            gap = 8
+            x = geometry.right() - self.width() - margin
+            y = geometry.bottom() - self.height() - margin - stack_index * (self.height() + gap)
+            self.move(max(geometry.left(), x), max(geometry.top(), y))
+            self.show()
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.button() == Qt.LeftButton:
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.buttons() & Qt.LeftButton and self._drag_offset is not None:
+                self._manually_moved = True
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._drag_offset = None
+            super().mouseReleaseEvent(event)
 
     class ReceiveToast(QWidget):
         def __init__(self, result: ReceiveResult | None = None) -> None:
@@ -1105,6 +1101,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     receive_progress_windows: list[ReceiveProgressWindow] = []
     send_windows: list[SendProgressWindow] = []
 
+    def position_send_toasts() -> None:
+        base_index = len(active_toasts)
+        for index, window in enumerate(reversed(send_windows)):
+            window.show_near_tray(app, base_index + index)
+
     def start_send_task(peer, paths: list[Path]) -> None:
         cancel_event = threading.Event()
 
@@ -1118,10 +1119,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             on_retry=retry,
         )
         send_windows.append(window)
-        window.destroyed.connect(lambda *_: send_windows.remove(window) if window in send_windows else None)
-        window.show()
-        window.raise_()
-        window.activateWindow()
+        window.destroyed.connect(lambda *_: remove_send_window(window))
+        position_send_toasts()
 
         def worker() -> None:
             failed = False
@@ -1132,12 +1131,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                     peer.address,
                     peer.identity.listen_port,
                     paths,
-                    on_progress=lambda progress: QTimer.singleShot(
-                        0,
-                        lambda progress=progress: (
-                            window.set_progress(progress),
-                            floating_window._set_lan_progress(peer.identity.device_name, progress),
-                        ),
+                    on_progress=lambda progress: ui_events.send_progress.emit(
+                        window,
+                        progress,
+                        peer.identity.device_name,
                     ),
                     cancel_event=cancel_event,
                 )
@@ -1148,15 +1145,12 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 error_message = str(exc)
                 print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
             finally:
-                QTimer.singleShot(
-                    0,
-                    lambda failed=failed, cancelled=cancelled, error_message=error_message: finish_send_window(
-                        window,
-                        peer.identity.device_name,
-                        failed,
-                        cancelled,
-                        error_message,
-                    ),
+                ui_events.send_finished.emit(
+                    window,
+                    peer.identity.device_name,
+                    failed,
+                    cancelled,
+                    error_message,
                 )
 
         threading.Thread(
@@ -1164,6 +1158,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             name=f"LocalNetFTPSend-{peer.identity.device_id}",
             daemon=True,
         ).start()
+
+    def remove_send_window(window: SendProgressWindow) -> None:
+        if window in send_windows:
+            send_windows.remove(window)
+            position_send_toasts()
+
+    def update_send_progress(window: SendProgressWindow, progress: TransferProgress, peer_name: str) -> None:
+        if window not in send_windows:
+            return
+        window.set_progress(progress)
+        floating_window._set_lan_progress(peer_name, progress)
 
     def finish_send_window(
         window: SendProgressWindow,
@@ -1222,6 +1227,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     ui_events = UiEvents()
     ui_events.received.connect(show_received_prompt)
     ui_events.receive_progress.connect(show_receive_progress)
+    ui_events.send_progress.connect(update_send_progress)
+    ui_events.send_finished.connect(finish_send_window)
     ui_events.error.connect(show_error_message)
     ui_events.internet_ticket.connect(show_ticket_window)
     ui_events.internet_progress.connect(handle_internet_progress)
@@ -1456,6 +1463,18 @@ def _toast_stylesheet() -> str:
         background-color: rgba(255, 255, 255, 235);
         color: #172033;
         selection-background-color: #bfdbfe;
+    }
+    QProgressBar#toastProgress {
+        min-height: 7px;
+        max-height: 7px;
+        border: 0;
+        border-radius: 3px;
+        background-color: rgba(210, 218, 228, 190);
+        text-align: center;
+    }
+    QProgressBar#toastProgress::chunk {
+        border-radius: 3px;
+        background-color: #2f7dd1;
     }
     QPushButton {
         min-height: 26px;
