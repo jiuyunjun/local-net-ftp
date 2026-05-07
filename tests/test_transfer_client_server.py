@@ -75,6 +75,33 @@ def test_send_paths_reports_progress(tmp_path):
         ("progress", "single.txt", 1, 1),
         ("done", "single.txt", 1, 1),
     ]
+    assert events[-1].bytes_sent == single_file.stat().st_size
+    assert events[-1].total_bytes == single_file.stat().st_size
+
+
+def test_send_paths_reports_aggregate_progress_for_multiple_files(tmp_path):
+    receive_dir = tmp_path / "receive"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    first_file = source_dir / "a.txt"
+    second_file = source_dir / "b.txt"
+    first_file.write_bytes(b"a" * 3)
+    second_file.write_bytes(b"b" * 5)
+    events = []
+
+    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server.start()
+    try:
+        send_paths("127.0.0.1", server._port, [source_dir], on_progress=events.append)
+        _wait_for(lambda: (receive_dir / "source" / "b.txt").exists())
+    finally:
+        server.stop()
+
+    byte_events = [event for event in events if event.total_bytes]
+    assert byte_events
+    assert all(event.total_bytes == 8 for event in byte_events)
+    assert [event.bytes_sent for event in byte_events] == sorted(event.bytes_sent for event in byte_events)
+    assert byte_events[-1].bytes_sent == 8
 
 
 def test_send_paths_keeps_existing_file_when_names_conflict(tmp_path):

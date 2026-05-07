@@ -523,11 +523,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             )
 
         def _set_lan_progress(self, peer_name: str, progress: TransferProgress) -> None:
+            if progress.total_bytes > 0:
+                percent = round(progress.bytes_sent * 100 / progress.total_bytes)
+                self.transfer_status.setText(
+                    f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path} {percent}%"
+                )
+                self._show_progress(percent)
+                return
             self.transfer_status.setText(
                 f"{peer_name}: {progress.item_index}/{progress.item_count} {progress.relative_path}"
             )
-            if progress.total_bytes > 0:
-                self._show_progress(round(progress.bytes_sent * 100 / progress.total_bytes))
+            self._show_progress(0)
 
         def _send_finished(self, peer_name: str, failed: bool, error_message: str = "") -> None:
             with self._send_lock:

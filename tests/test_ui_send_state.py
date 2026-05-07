@@ -18,6 +18,17 @@ def test_send_summary_mentions_counts_and_peer_names():
 def test_confirmation_text_lists_recipients_and_paths():
     text = confirmation_text(["A-PC"], [Path("a.txt"), Path("folder")])
 
-    assert "发送给：A-PC" in text
+    assert "发送给（1）：A-PC" in text
+    assert "发送内容（2 个项目）" in text
     assert "- a.txt" in text
     assert "- folder" in text
+
+
+def test_confirmation_text_summarizes_large_path_lists():
+    text = confirmation_text(["A-PC"], [Path(f"file-{index}.txt") for index in range(12)])
+
+    assert "发送内容（12 个项目）" in text
+    assert "- file-0.txt" in text
+    assert "- file-7.txt" in text
+    assert "file-8.txt" not in text
+    assert "... 另 4 个项目" in text

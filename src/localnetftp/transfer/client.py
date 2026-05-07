@@ -40,6 +40,8 @@ def send_paths(
 ) -> None:
     items = scan_transfer_items(paths)
     item_count = len(items)
+    total_bytes = sum(item.size for item in items if not item.is_dir)
+    completed_bytes = 0
 
     with socket.create_connection((address, port), timeout=timeout) as sock:
         send_json(
@@ -55,15 +57,15 @@ def send_paths(
             raise ConnectionError("Receiver rejected the transfer request.")
 
         for index, item in enumerate(items, start=1):
-            offset = ack.offsets.get(item.relative_path, 0)
+            offset = min(ack.offsets.get(item.relative_path, 0), item.size)
             _emit(
                 on_progress,
                 "start",
                 item.relative_path,
                 index,
                 item_count,
-                bytes_sent=offset,
-                total_bytes=item.size,
+                bytes_sent=completed_bytes + offset,
+                total_bytes=total_bytes,
             )
             if item.is_dir:
                 send_json(
@@ -73,7 +75,15 @@ def send_paths(
                         "relative_path": item.relative_path,
                     },
                 )
-                _emit(on_progress, "done", item.relative_path, index, item_count)
+                _emit(
+                    on_progress,
+                    "done",
+                    item.relative_path,
+                    index,
+                    item_count,
+                    bytes_sent=completed_bytes,
+                    total_bytes=total_bytes,
+                )
             else:
                 send_json(
                     sock,
@@ -93,24 +103,25 @@ def send_paths(
                     on_chunk=lambda bytes_sent,
                     relative_path=item.relative_path,
                     item_index=index,
-                    total_size=item.size: _emit(
+                    completed_before=completed_bytes: _emit(
                         on_progress,
                         "progress",
                         relative_path,
                         item_index,
                         item_count,
-                        bytes_sent=bytes_sent,
-                        total_bytes=total_size,
+                        bytes_sent=completed_before + bytes_sent,
+                        total_bytes=total_bytes,
                     ),
                 )
+                completed_bytes += item.size
                 _emit(
                     on_progress,
                     "done",
                     item.relative_path,
                     index,
                     item_count,
-                    bytes_sent=item.size,
-                    total_bytes=item.size,
+                    bytes_sent=completed_bytes,
+                    total_bytes=total_bytes,
                 )
 
         send_json(sock, {"type": TRANSFER_DONE_TYPE})
