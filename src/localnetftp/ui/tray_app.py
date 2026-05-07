@@ -803,6 +803,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowFlag(Qt.FramelessWindowHint, True)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+            self.setAttribute(Qt.WA_DeleteOnClose, True)
             self.setFixedWidth(340)
             self._drag_offset: QPoint | None = None
             self._manually_moved = False
@@ -916,6 +917,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._drag_offset = None
             super().mouseReleaseEvent(event)
 
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            remove_received_toast(self)
+            super().closeEvent(event)
+
         def _open_save_location(self) -> None:
             _open_save_location(self.paths)
             self.close()
@@ -933,7 +938,6 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         toast = ReceiveToast(result)
         active_toasts.append(toast)
-        toast.destroyed.connect(lambda *_: remove_received_toast(toast))
         position_received_toasts()
 
     def remove_received_toast(toast: ReceiveToast) -> None:
