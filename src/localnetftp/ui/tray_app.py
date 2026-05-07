@@ -843,22 +843,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.close()
             self._on_retry()
 
-        def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
+        def show_near_tray(self, app: QApplication, tray_icon: QSystemTrayIcon | None, stack_index: int = 0) -> None:
             if self._manually_moved:
                 self.show()
                 return
-            screen = app.primaryScreen()
-            if screen is None:
-                self.show()
-                return
-            self.adjustSize()
-            geometry = screen.availableGeometry()
-            margin = 16
-            gap = 8
-            x = geometry.right() - self.width() - margin
-            y = geometry.bottom() - self.height() - margin - stack_index * (self.height() + gap)
-            self.move(max(geometry.left(), x), max(geometry.top(), y))
-            self.show()
+            _show_widget_near_tray(self, app, tray_icon, stack_index)
 
         def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.button() == Qt.LeftButton:
@@ -1009,22 +998,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self._layout.insertWidget(2, self._preview_widget_ref)
             self.adjustSize()
 
-        def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
+        def show_near_tray(self, app: QApplication, tray_icon: QSystemTrayIcon | None, stack_index: int = 0) -> None:
             if self._manually_moved:
                 self.show()
                 return
-            screen = app.primaryScreen()
-            if screen is None:
-                self.show()
-                return
-            self.adjustSize()
-            geometry = screen.availableGeometry()
-            margin = 16
-            gap = 8
-            x = geometry.right() - self.width() - margin
-            y = geometry.bottom() - self.height() - margin - stack_index * (self.height() + gap)
-            self.move(max(geometry.left(), x), max(geometry.top(), y))
-            self.show()
+            _show_widget_near_tray(self, app, tray_icon, stack_index)
 
         def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.button() == Qt.LeftButton:
@@ -1064,6 +1042,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     active_toasts: list[ReceiveToast] = []
     receive_toasts_by_id: dict[str, ReceiveToast] = {}
     internet_receive_toasts: list[ReceiveToast] = []
+    tray: QSystemTrayIcon | None = None
 
     def show_received_prompt(result: ReceiveResult) -> None:
         paths = result.paths
@@ -1109,7 +1088,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     def position_received_toasts() -> None:
         for index, toast in enumerate(reversed(active_toasts)):
-            toast.show_near_tray(app, index)
+            toast.show_near_tray(app, tray, index)
 
     def show_internet_receive_toast() -> ReceiveToast:
         toast = ReceiveToast()
@@ -1125,7 +1104,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     def position_send_toasts() -> None:
         base_index = len(active_toasts)
         for index, window in enumerate(reversed(send_windows)):
-            window.show_near_tray(app, base_index + index)
+            window.show_near_tray(app, tray, base_index + index)
 
     def start_send_task(peer, paths: list[Path]) -> None:
         cancel_event = threading.Event()
@@ -1429,6 +1408,47 @@ def _open_received_item(paths: list[Path]) -> None:
 
 def _open_path(path: Path) -> None:
     os.startfile(path)  # type: ignore[attr-defined]
+
+
+def _show_widget_near_tray(widget, app, tray_icon, stack_index: int = 0) -> None:
+    widget.adjustSize()
+    margin = 16
+    gap = 8
+
+    tray_geometry = tray_icon.geometry() if tray_icon is not None else None
+    has_tray_geometry = (
+        tray_geometry is not None
+        and tray_geometry.isValid()
+        and not tray_geometry.isNull()
+    )
+    screen = app.screenAt(tray_geometry.center()) if has_tray_geometry else app.primaryScreen()
+    if screen is None:
+        widget.show()
+        return
+
+    available = screen.availableGeometry()
+    if has_tray_geometry:
+        x = tray_geometry.right() - widget.width()
+        if tray_geometry.center().y() >= available.center().y():
+            y = tray_geometry.top() - widget.height() - margin - stack_index * (widget.height() + gap)
+        else:
+            y = tray_geometry.bottom() + margin + stack_index * (widget.height() + gap)
+    else:
+        x = available.right() - widget.width() - margin
+        y = available.bottom() - widget.height() - margin - stack_index * (widget.height() + gap)
+
+    min_x = available.left() + margin
+    max_x = available.right() - widget.width() - margin
+    min_y = available.top() + margin
+    max_y = available.bottom() - widget.height() - margin
+    widget.move(_clamp(x, min_x, max_x), _clamp(y, min_y, max_y))
+    widget.show()
+
+
+def _clamp(value: int, minimum: int, maximum: int) -> int:
+    if maximum < minimum:
+        return minimum
+    return max(minimum, min(maximum, value))
 
 
 def _internet_progress_percent(progress: InternetTransferProgress) -> int:
