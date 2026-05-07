@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ def send_paths(
     paths: list[Path],
     timeout: float = 15.0,
     on_progress: ProgressCallback | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> None:
     items = scan_transfer_items(paths)
     item_count = len(items)
@@ -57,6 +59,8 @@ def send_paths(
             raise ConnectionError("Receiver rejected the transfer request.")
 
         for index, item in enumerate(items, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                raise InterruptedError("Transfer cancelled.")
             offset = min(ack.offsets.get(item.relative_path, 0), item.size)
             _emit(
                 on_progress,
@@ -100,6 +104,7 @@ def send_paths(
                     item.source_path,
                     item.size,
                     offset=offset,
+                    should_cancel=lambda: cancel_event is not None and cancel_event.is_set(),
                     on_chunk=lambda bytes_sent,
                     relative_path=item.relative_path,
                     item_index=index,

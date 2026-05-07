@@ -17,6 +17,7 @@ CONFIG_FILE_NAME = "config.json"
 class AppConfig:
     receive_dir: Path
     start_on_boot: bool = False
+    confirm_before_send: bool = True
     device_name: str = ""
     device_id: str = ""
 
@@ -101,6 +102,10 @@ def _config_from_json_data(raw_data: object) -> AppConfig:
     if not isinstance(start_on_boot, bool):
         raise ValueError("Config field 'start_on_boot' must be a boolean.")
 
+    confirm_before_send = raw_data.get("confirm_before_send", True)
+    if not isinstance(confirm_before_send, bool):
+        raise ValueError("Config field 'confirm_before_send' must be a boolean.")
+
     device_name = raw_data.get("device_name")
     if device_name is None:
         display_name = default_device_name()
@@ -120,6 +125,7 @@ def _config_from_json_data(raw_data: object) -> AppConfig:
     return AppConfig(
         receive_dir=receive_path,
         start_on_boot=start_on_boot,
+        confirm_before_send=confirm_before_send,
         device_name=display_name,
         device_id=local_device_id,
     )

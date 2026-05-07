@@ -41,9 +41,23 @@ class ReceivePlan:
 @dataclass(frozen=True)
 class ReceiveResult:
     paths: list[Path]
+    transfer_id: str = ""
+
+
+@dataclass(frozen=True)
+class ReceiveProgress:
+    transfer_id: str
+    event: str
+    relative_path: str
+    item_index: int
+    item_count: int
+    bytes_done: int = 0
+    total_bytes: int = 0
+    paths: list[Path] | None = None
 
 
 ReceiveCallback = Callable[[ReceiveResult], None]
+ReceiveProgressCallback = Callable[[ReceiveProgress], None]
 
 
 class TransferServer:
@@ -53,11 +67,13 @@ class TransferServer:
         port: int,
         host: str = "0.0.0.0",
         on_received: ReceiveCallback | None = None,
+        on_progress: ReceiveProgressCallback | None = None,
     ) -> None:
         self._receive_dir = receive_dir
         self._host = host
         self._port = port
         self._on_received = on_received
+        self._on_progress = on_progress
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._socket: socket.socket | None = None
@@ -109,6 +125,7 @@ class TransferServer:
             return
 
     def _handle_client(self, client: socket.socket) -> None:
+        transfer_id = uuid.uuid4().hex
         with client:
             request = recv_json(client)
             if request.get("type") != TRANSFER_REQUEST_TYPE or request.get("version") != TRANSFER_VERSION:
@@ -116,6 +133,11 @@ class TransferServer:
                 return
 
             plans, root_paths = self._prepare_receive_plans(request.get("items"))
+            item_order = _manifest_item_order(request.get("items"))
+            item_count = len(item_order)
+            item_index_by_path = {relative_path: index for index, relative_path in enumerate(item_order, start=1)}
+            total_bytes = sum(plan.size for plan in plans.values())
+            completed_bytes = 0
             send_json(
                 client,
                 {
@@ -132,11 +154,47 @@ class TransferServer:
                 frame = recv_json(client)
                 frame_type = frame.get("type")
                 if frame_type == TRANSFER_DONE_TYPE:
-                    self._notify_received(root_paths)
+                    self._emit_progress(
+                        ReceiveProgress(
+                            transfer_id=transfer_id,
+                            event="all_done",
+                            relative_path="",
+                            item_index=item_count,
+                            item_count=item_count,
+                            bytes_done=total_bytes,
+                            total_bytes=total_bytes,
+                            paths=root_paths,
+                        )
+                    )
+                    self._notify_received(root_paths, transfer_id)
                     return
                 if frame_type == TRANSFER_DIR_TYPE:
-                    destination = safe_destination_path(self._receive_dir, _relative_path(frame))
+                    relative_path = _relative_path(frame)
+                    destination = safe_destination_path(self._receive_dir, relative_path)
+                    index = item_index_by_path.get(relative_path, 0)
+                    self._emit_progress(
+                        ReceiveProgress(
+                            transfer_id=transfer_id,
+                            event="start",
+                            relative_path=relative_path,
+                            item_index=index,
+                            item_count=item_count,
+                            bytes_done=completed_bytes,
+                            total_bytes=total_bytes,
+                        )
+                    )
                     destination.mkdir(parents=True, exist_ok=True)
+                    self._emit_progress(
+                        ReceiveProgress(
+                            transfer_id=transfer_id,
+                            event="done",
+                            relative_path=relative_path,
+                            item_index=index,
+                            item_count=item_count,
+                            bytes_done=completed_bytes,
+                            total_bytes=total_bytes,
+                        )
+                    )
                     continue
                 if frame_type == TRANSFER_FILE_TYPE:
                     size = frame.get("size")
@@ -149,8 +207,52 @@ class TransferServer:
                     offset = frame.get("offset", 0)
                     if not isinstance(offset, int) or offset != plan.offset:
                         raise ValueError("Transfer file offset does not match receiver state.")
-                    recv_file_bytes(client, plan.partial_path, plan.size, offset=plan.offset)
+                    index = item_index_by_path.get(relative_path, 0)
+                    completed_before = completed_bytes
+                    self._emit_progress(
+                        ReceiveProgress(
+                            transfer_id=transfer_id,
+                            event="start",
+                            relative_path=relative_path,
+                            item_index=index,
+                            item_count=item_count,
+                            bytes_done=completed_before + plan.offset,
+                            total_bytes=total_bytes,
+                        )
+                    )
+                    recv_file_bytes(
+                        client,
+                        plan.partial_path,
+                        plan.size,
+                        offset=plan.offset,
+                        on_chunk=lambda bytes_done,
+                        relative_path=relative_path,
+                        index=index,
+                        completed_before=completed_before: self._emit_progress(
+                            ReceiveProgress(
+                                transfer_id=transfer_id,
+                                event="progress",
+                                relative_path=relative_path,
+                                item_index=index,
+                                item_count=item_count,
+                                bytes_done=completed_before + bytes_done,
+                                total_bytes=total_bytes,
+                            )
+                        ),
+                    )
                     _finalize_plan(plan)
+                    completed_bytes = completed_before + plan.size
+                    self._emit_progress(
+                        ReceiveProgress(
+                            transfer_id=transfer_id,
+                            event="done",
+                            relative_path=relative_path,
+                            item_index=index,
+                            item_count=item_count,
+                            bytes_done=completed_bytes,
+                            total_bytes=total_bytes,
+                        )
+                    )
                     continue
                 raise ValueError("Unsupported transfer frame type.")
 
@@ -173,12 +275,16 @@ class TransferServer:
             root_paths_by_name.setdefault(root_name, _root_destination(plan.destination, relative_path))
         return plans, list(root_paths_by_name.values())
 
-    def _notify_received(self, paths: list[Path]) -> None:
+    def _notify_received(self, paths: list[Path], transfer_id: str = "") -> None:
         if self._on_received is None or not paths:
             return
         existing_paths = [path for path in paths if path.exists()]
         if existing_paths:
-            self._on_received(ReceiveResult(existing_paths))
+            self._on_received(ReceiveResult(existing_paths, transfer_id=transfer_id))
+
+    def _emit_progress(self, progress: ReceiveProgress) -> None:
+        if self._on_progress is not None:
+            self._on_progress(progress)
 
 
 def _relative_path(frame: dict) -> str:
@@ -186,6 +292,18 @@ def _relative_path(frame: dict) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError("Transfer frame must contain a relative path.")
     return value
+
+
+def _manifest_item_order(items: object) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    result: list[str] = []
+    for item in items:
+        if isinstance(item, dict):
+            value = item.get("relative_path")
+            if isinstance(value, str):
+                result.append(value)
+    return result
 
 
 def _root_name(relative_path: str) -> str:

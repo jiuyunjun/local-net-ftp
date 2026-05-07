@@ -55,6 +55,7 @@ def test_save_and_load_config_round_trip(tmp_path):
     expected = AppConfig(
         receive_dir=tmp_path / "Downloads",
         start_on_boot=True,
+        confirm_before_send=False,
         device_name="A-PC",
         device_id="device-a",
     )
@@ -67,6 +68,7 @@ def test_save_and_load_config_round_trip(tmp_path):
     assert json.loads(config_path.read_text(encoding="utf-8")) == {
         "receive_dir": str(tmp_path / "Downloads"),
         "start_on_boot": True,
+        "confirm_before_send": False,
         "device_name": "A-PC",
         "device_id": "device-a",
     }
@@ -85,6 +87,14 @@ def test_load_config_rejects_invalid_start_on_boot(tmp_path):
     config_path.write_text('{"start_on_boot": "yes"}', encoding="utf-8")
 
     with pytest.raises(ValueError, match="start_on_boot"):
+        load_config(config_path)
+
+
+def test_load_config_rejects_invalid_confirm_before_send(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text('{"confirm_before_send": "yes"}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="confirm_before_send"):
         load_config(config_path)
 
 

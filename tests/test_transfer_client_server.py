@@ -1,4 +1,5 @@
 import socket
+import threading
 import time
 
 from localnetftp.transfer import TransferServer, send_paths
@@ -102,6 +103,48 @@ def test_send_paths_reports_aggregate_progress_for_multiple_files(tmp_path):
     assert all(event.total_bytes == 8 for event in byte_events)
     assert [event.bytes_sent for event in byte_events] == sorted(event.bytes_sent for event in byte_events)
     assert byte_events[-1].bytes_sent == 8
+
+
+def test_receiver_reports_progress(tmp_path):
+    receive_dir = tmp_path / "receive"
+    single_file = tmp_path / "single.txt"
+    single_file.write_bytes(b"abc")
+    received_progress = []
+
+    server = TransferServer(receive_dir=receive_dir, port=_free_port(), on_progress=received_progress.append)
+    server.start()
+    try:
+        send_paths("127.0.0.1", server._port, [single_file])
+        _wait_for(lambda: (receive_dir / "single.txt").exists())
+    finally:
+        server.stop()
+
+    assert any(event.event == "progress" and event.relative_path == "single.txt" for event in received_progress)
+    assert received_progress[-1].event == "all_done"
+    assert received_progress[-1].bytes_done == single_file.stat().st_size
+    assert received_progress[-1].total_bytes == single_file.stat().st_size
+
+
+def test_send_paths_can_cancel_before_file_transfer(tmp_path):
+    receive_dir = tmp_path / "receive"
+    single_file = tmp_path / "single.txt"
+    single_file.write_text("world", encoding="utf-8")
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server.start()
+    try:
+        try:
+            send_paths("127.0.0.1", server._port, [single_file], cancel_event=cancel_event)
+        except InterruptedError:
+            pass
+        else:
+            raise AssertionError("Expected cancelled transfer to raise InterruptedError.")
+    finally:
+        server.stop()
+
+    assert not (receive_dir / "single.txt").exists()
 
 
 def test_send_paths_keeps_existing_file_when_names_conflict(tmp_path):

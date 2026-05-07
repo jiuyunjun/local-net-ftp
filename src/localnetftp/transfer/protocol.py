@@ -130,6 +130,7 @@ def send_file_bytes(
     *,
     offset: int = 0,
     on_chunk: Any = None,
+    should_cancel: Any = None,
 ) -> None:
     if offset < 0 or offset > size:
         raise ValueError("Transfer offset must be within the file size.")
@@ -138,6 +139,8 @@ def send_file_bytes(
     with path.open("rb") as file:
         file.seek(offset)
         while sent < size:
+            if should_cancel is not None and should_cancel():
+                raise InterruptedError("Transfer cancelled.")
             chunk = file.read(min(CHUNK_SIZE, size - sent))
             if not chunk:
                 break
@@ -149,12 +152,13 @@ def send_file_bytes(
         raise OSError(f"Failed to read complete file: {path}")
 
 
-def recv_file_bytes(sock: socket.socket, path: Path, size: int, *, offset: int = 0) -> None:
+def recv_file_bytes(sock: socket.socket, path: Path, size: int, *, offset: int = 0, on_chunk: Any = None) -> None:
     if offset < 0 or offset > size:
         raise ValueError("Transfer offset must be within the file size.")
 
     path.parent.mkdir(parents=True, exist_ok=True)
     remaining = size - offset
+    received = offset
     with path.open("ab" if offset else "wb") as file:
         while remaining:
             chunk = sock.recv(min(CHUNK_SIZE, remaining))
@@ -162,6 +166,9 @@ def recv_file_bytes(sock: socket.socket, path: Path, size: int, *, offset: int =
                 raise ConnectionError("Connection closed during file transfer.")
             file.write(chunk)
             remaining -= len(chunk)
+            received += len(chunk)
+            if on_chunk is not None:
+                on_chunk(received)
 
 
 def _recv_exact(sock: socket.socket, size: int) -> bytes:

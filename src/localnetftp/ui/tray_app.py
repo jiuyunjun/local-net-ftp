@@ -24,7 +24,7 @@ from localnetftp.internet_transfer import (
 )
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
 from localnetftp.share import DownloadShareServer, ShareAddress
-from localnetftp.transfer import ReceiveResult, TransferProgress, TransferServer, send_paths
+from localnetftp.transfer import ReceiveProgress, ReceiveResult, TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
 from localnetftp.ui.send_state import can_send, confirmation_text, send_summary
@@ -123,6 +123,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     class UiEvents(QObject):
         received = Signal(object)
+        receive_progress = Signal(object)
         error = Signal(str)
         internet_ticket = Signal(object, object)
         internet_progress = Signal(object)
@@ -155,6 +156,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if self.options.dev_instance and self.config_path is not None and not self.config_path.exists():
                 config = AppConfig(
                     receive_dir=self.config_dir / "Downloads",
+                    confirm_before_send=True,
                     device_name=f"LocalNetFTP {self.options.dev_instance}",
                     device_id=f"localnetftp-dev-{self.options.dev_instance}",
                 )
@@ -198,6 +200,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.config.receive_dir,
                 self.options.transfer_port,
                 on_received=self.on_received,
+                on_progress=lambda progress: ui_events.receive_progress.emit(progress),
             )
             try:
                 self.transfer_server.start()
@@ -397,6 +400,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             config = AppConfig(
                 receive_dir=self._runtime.config.receive_dir,
                 start_on_boot=self._runtime.config.start_on_boot,
+                confirm_before_send=self._runtime.config.confirm_before_send,
                 device_name=device_name,
                 device_id=self._runtime.config.device_id,
             )
@@ -479,16 +483,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self._update_send_button()
                 return
 
-            result = QMessageBox.question(
-                self,
-                "确认发送",
-                confirmation_text(display_names, paths),
-                QMessageBox.Ok | QMessageBox.Cancel,
-                QMessageBox.Ok,
-            )
-            if result != QMessageBox.Ok:
-                self._update_send_button()
-                return
+            if self._runtime.config.confirm_before_send:
+                result = QMessageBox.question(
+                    self,
+                    "确认发送",
+                    confirmation_text(display_names, paths),
+                    QMessageBox.Ok | QMessageBox.Cancel,
+                    QMessageBox.Ok,
+                )
+                if result != QMessageBox.Ok:
+                    self._update_send_button()
+                    return
 
             if internet_selected:
                 self.transfer_status.setText("正在生成公网 ticket...")
@@ -503,12 +508,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 print(f"LocalNetFTP: {send_summary(peer_names, paths)}", file=sys.stderr)
                 self._update_send_button()
                 for peer in peers:
-                    threading.Thread(
-                        target=self._send_to_peer,
-                        args=(peer, list(paths)),
-                        name=f"LocalNetFTPSend-{peer.identity.device_id}",
-                        daemon=True,
-                    ).start()
+                    start_send_task(peer, list(paths))
 
         def _send_to_peer(self, peer, paths: list[Path]) -> None:
             failed = False
@@ -651,6 +651,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             receive_layout.addWidget(browse_button)
 
             self.start_on_boot = QCheckBox("开机自动启动")
+            self.confirm_before_send = QCheckBox("发送前显示确认框")
 
             save_button = QPushButton("保存设置")
             save_button.clicked.connect(self._save)
@@ -661,6 +662,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.addWidget(receive_label)
             layout.addLayout(receive_layout)
             layout.addWidget(self.start_on_boot)
+            layout.addWidget(self.confirm_before_send)
             layout.addStretch(1)
             layout.addWidget(save_button, alignment=Qt.AlignRight)
 
@@ -674,6 +676,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.start_on_boot.setChecked(
                 is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
             )
+            self.confirm_before_send.setChecked(config.confirm_before_send)
 
         def _choose_receive_dir(self) -> None:
             selected = QFileDialog.getExistingDirectory(self, "选择接收目录", self.receive_dir.text())
@@ -690,6 +693,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             config = AppConfig(
                 receive_dir=receive_dir,
                 start_on_boot=self.start_on_boot.isChecked(),
+                confirm_before_send=self.confirm_before_send.isChecked(),
                 device_name=device_name,
                 device_id=self._runtime.config.device_id,
             )
@@ -794,10 +798,80 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if progress.stage == "done":
                 QTimer.singleShot(1600, self.close)
 
-    class ReceiveToast(QWidget):
-        def __init__(self, result: ReceiveResult) -> None:
+    class SendProgressWindow(QWidget):
+        def __init__(self, peer_name: str, paths: list[Path], on_cancel, on_retry) -> None:
             super().__init__()
-            self.paths = result.paths
+            self.peer_name = peer_name
+            self.paths = paths
+            self._on_cancel = on_cancel
+            self._on_retry = on_retry
+            self.setWindowTitle("发送文件")
+            self.setMinimumSize(380, 132)
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+
+            self.status = QLabel(f"正在发送给 {peer_name}")
+            self.detail = QLabel(_send_items_text(paths))
+            self.detail.setObjectName("transferDetail")
+            self.detail.setWordWrap(True)
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
+            self.cancel_button = QPushButton("取消")
+            self.cancel_button.clicked.connect(self._cancel)
+            self.retry_button = QPushButton("重试")
+            self.retry_button.clicked.connect(self._retry)
+            self.retry_button.hide()
+
+            button_layout = QHBoxLayout()
+            button_layout.addStretch(1)
+            button_layout.addWidget(self.retry_button)
+            button_layout.addWidget(self.cancel_button)
+
+            layout = QVBoxLayout(self)
+            layout.addWidget(self.status)
+            layout.addWidget(self.detail)
+            layout.addWidget(self.progress)
+            layout.addLayout(button_layout)
+            self.setStyleSheet(_app_stylesheet())
+
+        def set_progress(self, progress: TransferProgress) -> None:
+            percent = _transfer_progress_percent(progress.bytes_sent, progress.total_bytes)
+            self.status.setText(
+                f"正在发送给 {self.peer_name}：{progress.item_index}/{progress.item_count} {progress.relative_path} {percent}%"
+            )
+            self.progress.setValue(percent)
+
+        def finish_success(self) -> None:
+            self.status.setText(f"发送给 {self.peer_name} 完成")
+            self.progress.setValue(100)
+            self.cancel_button.hide()
+            self.retry_button.hide()
+            QTimer.singleShot(5000, self.close)
+
+        def finish_failed(self, message: str) -> None:
+            self.status.setText(f"发送给 {self.peer_name} 失败：{message}")
+            self.cancel_button.hide()
+            self.retry_button.show()
+
+        def finish_cancelled(self) -> None:
+            self.status.setText(f"已取消发送给 {self.peer_name}")
+            self.cancel_button.hide()
+            self.retry_button.show()
+
+        def _cancel(self) -> None:
+            self._on_cancel()
+            self.status.setText(f"正在取消发送给 {self.peer_name}...")
+            self.cancel_button.setEnabled(False)
+
+        def _retry(self) -> None:
+            self.close()
+            self._on_retry()
+
+    class ReceiveToast(QWidget):
+        def __init__(self, result: ReceiveResult | None = None) -> None:
+            super().__init__()
+            self.paths = result.paths if result is not None else []
+            self._preview_widget_ref: QWidget | None = None
             self.setWindowTitle("收到文件")
             self.setWindowFlag(Qt.Tool, True)
             self.setWindowFlag(Qt.FramelessWindowHint, True)
@@ -821,31 +895,38 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             title_layout.addWidget(title, 1)
             title_layout.addWidget(close_button)
 
-            message = QLabel(_received_message(self.paths))
-            message.setObjectName("toastMessage")
-            message.setWordWrap(True)
-            message.setAttribute(Qt.WA_TransparentForMouseEvents, True)
-            preview_widget = self._preview_widget()
+            self.message = QLabel(_received_message(self.paths) if self.paths else "正在接收文件")
+            self.message.setObjectName("toastMessage")
+            self.message.setWordWrap(True)
+            self.message.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            self.progress = QProgressBar()
+            self.progress.setRange(0, 100)
+            self.progress.setValue(0)
 
-            open_folder = QPushButton("打开保存位置")
-            open_folder.clicked.connect(self._open_save_location)
-            open_item = QPushButton(_open_item_button_text(self.paths))
-            open_item.clicked.connect(self._open_received_item)
+            self.open_folder = QPushButton("打开保存位置")
+            self.open_folder.clicked.connect(self._open_save_location)
+            self.open_item = QPushButton(_open_item_button_text(self.paths) if self.paths else "打开文件")
+            self.open_item.clicked.connect(self._open_received_item)
+            if not self.paths:
+                self.open_folder.hide()
+                self.open_item.hide()
 
             button_layout = QHBoxLayout()
-            button_layout.addWidget(open_folder)
-            button_layout.addWidget(open_item)
+            button_layout.addWidget(self.open_folder)
+            button_layout.addWidget(self.open_item)
 
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 10, 12, 12)
             layout.setSpacing(8)
             layout.addLayout(title_layout)
-            layout.addWidget(message)
-            if preview_widget is not None:
-                layout.addWidget(preview_widget)
+            layout.addWidget(self.message)
+            layout.addWidget(self.progress)
             layout.addLayout(button_layout)
+            self._layout = layout
 
             self.setStyleSheet(_toast_stylesheet())
+            if self.paths:
+                self.complete(ReceiveResult(self.paths))
 
         def _preview_widget(self):
             if len(self.paths) != 1 or not self.paths[0].is_file():
@@ -880,6 +961,36 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 layout.addWidget(copy_button, alignment=Qt.AlignRight)
                 return container
             return None
+
+        def set_progress(self, progress: ReceiveProgress) -> None:
+            percent = _transfer_progress_percent(progress.bytes_done, progress.total_bytes)
+            if progress.relative_path:
+                self.message.setText(
+                    f"正在接收：{progress.item_index}/{progress.item_count} {progress.relative_path} {percent}%"
+                )
+            else:
+                self.message.setText(f"正在接收文件 {percent}%")
+            self.progress.setValue(percent)
+
+        def set_internet_progress(self, progress: InternetTransferProgress) -> None:
+            self.message.setText(_internet_progress_text(progress))
+            self.progress.setValue(_internet_progress_percent(progress))
+
+        def complete(self, result: ReceiveResult) -> None:
+            self.paths = result.paths
+            self.message.setText(_received_message(self.paths))
+            self.progress.setValue(100)
+            self.progress.hide()
+            self.open_folder.show()
+            self.open_item.setText(_open_item_button_text(self.paths))
+            self.open_item.show()
+            if self._preview_widget_ref is not None:
+                self._preview_widget_ref.setParent(None)
+                self._preview_widget_ref.deleteLater()
+            self._preview_widget_ref = self._preview_widget()
+            if self._preview_widget_ref is not None:
+                self._layout.insertWidget(2, self._preview_widget_ref)
+            self.adjustSize()
 
         def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
             if self._manually_moved:
@@ -922,35 +1033,155 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             super().closeEvent(event)
 
         def _open_save_location(self) -> None:
+            if not self.paths:
+                return
             _open_save_location(self.paths)
             self.close()
 
         def _open_received_item(self) -> None:
+            if not self.paths:
+                return
             _open_received_item(self.paths)
             self.close()
 
     active_toasts: list[ReceiveToast] = []
+    receive_toasts_by_id: dict[str, ReceiveToast] = {}
+    internet_receive_toasts: list[ReceiveToast] = []
 
     def show_received_prompt(result: ReceiveResult) -> None:
         paths = result.paths
         if not paths:
+            return
+        if result.transfer_id:
+            toast = receive_toasts_by_id.pop(result.transfer_id, None)
+            if toast is not None:
+                toast.complete(result)
+                position_received_toasts()
+                return
+        if internet_receive_toasts:
+            toast = internet_receive_toasts.pop(0)
+            toast.complete(result)
+            position_received_toasts()
             return
 
         toast = ReceiveToast(result)
         active_toasts.append(toast)
         position_received_toasts()
 
+    def show_receive_progress(progress: ReceiveProgress) -> None:
+        toast = receive_toasts_by_id.get(progress.transfer_id)
+        if toast is None:
+            toast = ReceiveToast()
+            receive_toasts_by_id[progress.transfer_id] = toast
+            active_toasts.append(toast)
+        if progress.event == "all_done" and progress.paths is not None:
+            toast.complete(ReceiveResult(progress.paths, transfer_id=progress.transfer_id))
+        else:
+            toast.set_progress(progress)
+        position_received_toasts()
+
     def remove_received_toast(toast: ReceiveToast) -> None:
         if toast in active_toasts:
             active_toasts.remove(toast)
-            position_received_toasts()
+        for transfer_id, active_toast in list(receive_toasts_by_id.items()):
+            if active_toast is toast:
+                receive_toasts_by_id.pop(transfer_id, None)
+        if toast in internet_receive_toasts:
+            internet_receive_toasts.remove(toast)
+        position_received_toasts()
 
     def position_received_toasts() -> None:
         for index, toast in enumerate(reversed(active_toasts)):
             toast.show_near_tray(app, index)
 
+    def show_internet_receive_toast() -> ReceiveToast:
+        toast = ReceiveToast()
+        internet_receive_toasts.append(toast)
+        active_toasts.append(toast)
+        position_received_toasts()
+        return toast
+
     ticket_windows: list[TicketWindow] = []
     receive_progress_windows: list[ReceiveProgressWindow] = []
+    send_windows: list[SendProgressWindow] = []
+
+    def start_send_task(peer, paths: list[Path]) -> None:
+        cancel_event = threading.Event()
+
+        def retry() -> None:
+            start_send_task(peer, list(paths))
+
+        window = SendProgressWindow(
+            peer.identity.device_name,
+            paths,
+            on_cancel=cancel_event.set,
+            on_retry=retry,
+        )
+        send_windows.append(window)
+        window.destroyed.connect(lambda *_: send_windows.remove(window) if window in send_windows else None)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+        def worker() -> None:
+            failed = False
+            cancelled = False
+            error_message = ""
+            try:
+                send_paths(
+                    peer.address,
+                    peer.identity.listen_port,
+                    paths,
+                    on_progress=lambda progress: QTimer.singleShot(
+                        0,
+                        lambda progress=progress: (
+                            window.set_progress(progress),
+                            floating_window._set_lan_progress(peer.identity.device_name, progress),
+                        ),
+                    ),
+                    cancel_event=cancel_event,
+                )
+            except InterruptedError:
+                cancelled = True
+            except Exception as exc:
+                failed = True
+                error_message = str(exc)
+                print(f"LocalNetFTP send failed to {peer.identity.device_name}: {exc}", file=sys.stderr)
+            finally:
+                QTimer.singleShot(
+                    0,
+                    lambda failed=failed, cancelled=cancelled, error_message=error_message: finish_send_window(
+                        window,
+                        peer.identity.device_name,
+                        failed,
+                        cancelled,
+                        error_message,
+                    ),
+                )
+
+        threading.Thread(
+            target=worker,
+            name=f"LocalNetFTPSend-{peer.identity.device_id}",
+            daemon=True,
+        ).start()
+
+    def finish_send_window(
+        window: SendProgressWindow,
+        peer_name: str,
+        failed: bool,
+        cancelled: bool,
+        error_message: str,
+    ) -> None:
+        if cancelled:
+            window.finish_cancelled()
+            floating_window.transfer_status.setText(f"{peer_name} 已取消")
+            return
+        if failed:
+            window.finish_failed(error_message)
+            floating_window.transfer_status.setText(f"{peer_name} 失败：{error_message}")
+            return
+        window.finish_success()
+        floating_window._finish_progress("发送完成")
 
     def show_ticket_window(provider: IrohTicketProvider, ticket: InternetTicket) -> None:
         floating_window.transfer_status.setText("公网 ticket 已生成")
@@ -978,6 +1209,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             for window in list(ticket_windows):
                 window.set_progress(progress)
             return
+        for toast in list(internet_receive_toasts):
+            toast.set_internet_progress(progress)
         for window in list(receive_progress_windows):
             window.set_progress(progress)
 
@@ -988,6 +1221,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     app.setQuitOnLastWindowClosed(False)
     ui_events = UiEvents()
     ui_events.received.connect(show_received_prompt)
+    ui_events.receive_progress.connect(show_receive_progress)
     ui_events.error.connect(show_error_message)
     ui_events.internet_ticket.connect(show_ticket_window)
     ui_events.internet_progress.connect(handle_internet_progress)
@@ -1053,7 +1287,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     def receive_ticket() -> None:
         ticket, accepted = QInputDialog.getMultiLineText(None, "输入 ticket", "粘贴对方发来的 ticket：")
         if accepted and ticket.strip():
-            show_receive_progress_window()
+            show_internet_receive_toast()
             runtime.receive_internet_ticket(ticket)
 
     share_action.triggered.connect(show_share_window)
@@ -1100,6 +1334,22 @@ def _received_message(paths: list[Path]) -> str:
     if len(paths) == 1:
         return f"已保存：{paths[0].name}"
     return f"已保存 {len(paths)} 个项目：\n" + "\n".join(path.name for path in paths[:8])
+
+
+def _send_items_text(paths: list[Path]) -> str:
+    if len(paths) == 1:
+        return paths[0].name
+    names = "、".join(path.name for path in paths[:3])
+    remaining_count = len(paths) - 3
+    if remaining_count > 0:
+        return f"{names} 等 {remaining_count} 个"
+    return names
+
+
+def _transfer_progress_percent(done: int, total: int) -> int:
+    if total <= 0:
+        return 0
+    return max(0, min(100, round(done * 100 / total)))
 
 
 def _is_image_preview_path(path: Path) -> bool:
