@@ -16,6 +16,7 @@ env/
 # Build outputs
 build/
 dist/
+tmp/
 *.spec
 
 # Packaging

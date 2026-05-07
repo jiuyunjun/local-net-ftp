@@ -761,11 +761,22 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setFixedWidth(340)
             self._drag_offset: QPoint | None = None
             self._manually_moved = False
+            self._finished = False
 
             self.status = QLabel(f"正在发送给 {peer_name}")
             self.status.setObjectName("toastTitle")
             self.status.setWordWrap(True)
             self.status.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            close_button = QPushButton("×")
+            close_button.setObjectName("toastClose")
+            close_button.setToolTip("关闭")
+            close_button.clicked.connect(self.close)
+
+            title_layout = QHBoxLayout()
+            title_layout.setContentsMargins(0, 0, 0, 0)
+            title_layout.addWidget(self.status, 1)
+            title_layout.addWidget(close_button)
+
             self.detail = QLabel(_send_items_text(paths))
             self.detail.setObjectName("toastMessage")
             self.detail.setWordWrap(True)
@@ -788,7 +799,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 10, 12, 12)
             layout.setSpacing(8)
-            layout.addWidget(self.status)
+            layout.addLayout(title_layout)
             layout.addWidget(self.detail)
             layout.addWidget(self.progress)
             layout.addLayout(button_layout)
@@ -802,6 +813,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.progress.setValue(percent)
 
         def finish_success(self) -> None:
+            self._finished = True
             self.status.setText(f"发送给 {self.peer_name} 完成")
             self.progress.setValue(100)
             self.cancel_button.hide()
@@ -809,16 +821,20 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             QTimer.singleShot(5000, self.close)
 
         def finish_failed(self, message: str) -> None:
+            self._finished = True
             self.status.setText(f"发送给 {self.peer_name} 失败：{message}")
             self.cancel_button.hide()
             self.retry_button.show()
 
         def finish_cancelled(self) -> None:
+            self._finished = True
             self.status.setText(f"已取消发送给 {self.peer_name}")
             self.cancel_button.hide()
             self.retry_button.show()
 
         def _cancel(self) -> None:
+            if self._finished:
+                return
             self._on_cancel()
             self.status.setText(f"正在取消发送给 {self.peer_name}...")
             self.cancel_button.setEnabled(False)
@@ -862,6 +878,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt method name
             self._drag_offset = None
             super().mouseReleaseEvent(event)
+
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if not self._finished:
+                self._cancel()
+            super().closeEvent(event)
 
     class ReceiveToast(QWidget):
         def __init__(self, result: ReceiveResult | None = None) -> None:
