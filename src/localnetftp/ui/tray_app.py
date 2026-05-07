@@ -1427,19 +1427,12 @@ def _show_widget_near_tray(widget, app, tray_icon, stack_index: int = 0) -> None
         return
 
     work_area = _work_area_bounds(screen)
-    if has_tray_geometry:
-        if tray_geometry.center().y() >= (work_area["top"] + work_area["bottom"]) // 2:
-            y = tray_geometry.top() - widget.height() - margin - stack_index * (widget.height() + gap)
-        else:
-            y = tray_geometry.bottom() + margin + stack_index * (widget.height() + gap)
-    else:
-        y = work_area["bottom"] - widget.height() - margin - stack_index * (widget.height() + gap)
-
     x = work_area["right"] - widget.width() - margin
+    y = work_area["bottom"] - widget.height() + 1 - stack_index * (widget.height() + gap)
     min_x = work_area["left"] + margin
     max_x = work_area["right"] - widget.width() - margin
     min_y = work_area["top"] + margin
-    max_y = work_area["bottom"] - widget.height() - margin
+    max_y = work_area["bottom"] - widget.height() + 1
     widget.move(_clamp(x, min_x, max_x), _clamp(y, min_y, max_y))
     widget.show()
 
