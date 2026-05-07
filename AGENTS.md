@@ -54,18 +54,21 @@
 - 本项目应使用 Git 管理。
 - 每次完成一次明确修改后生成一个 Git commit；如果当前目录还不是 Git 仓库，先询问用户是否初始化。
 - 不要自动 `git push`，除非用户明确要求。
-- 每次 commit 后必须立即本地打包 exe：`python scripts/build_exe.py`。如果打包失败，继续修复并追加新的 commit，直到打包成功。
-- 每次 commit 后必须同时启动正式版和 debug 版做冒烟验证：
-  - 正式版：启动 `dist/LocalNetFTP.exe`，等待数秒确认进程仍在运行，然后关闭该进程。
-  - debug 版：启动 `dist/LocalNetFTP.exe --dev-instance DEBUG`，等待数秒确认进程仍在运行，然后关闭该进程。
-  - 如果本地源码调试更合适，可额外运行 `python scripts/start_debug_client.py DEBUG`，但不能替代 exe 的 debug 启动验证。
-- 每次本地验证完成后，最终回复必须明确说明测试结果、commit hash、exe 路径、正式版启动验证、debug 版启动验证和 git 状态。
+- 不要每次 commit 后自动打包 exe。只有用户明确要求打包、发布或验证 exe 时，才执行 Nuitka 打包。
+- 手动打包入口：
+  - `scripts/build_exe.bat`
+  - 或 `python scripts/build_exe.py`
+- 每次完成代码或文档修改后必须同时启动 Python 正式版和 Python debug 版做冒烟验证：
+  - 正式版：启动 `python -m localnetftp`，等待数秒确认进程仍在运行，然后关闭该进程。
+  - debug 版：启动 `python -m localnetftp --dev-instance DEBUG`，等待数秒确认进程仍在运行，然后关闭该进程。
+  - 如需手动 debug，可额外运行 `python scripts/start_debug_client.py DEBUG`。
+- 每次本地验证完成后，最终回复必须明确说明测试结果、commit hash、Python 正式版启动验证、Python debug 版启动验证和 git 状态。若本轮执行了打包，再额外说明 exe 路径和 exe 冒烟结果。
 - 打包产物不要提交进源码仓库，除非用户明确要求发布二进制文件。
 
 推荐后续命令占位：
 - 安装依赖：`python -m pip install -r requirements-dev.txt`
 - 运行测试：`python -m pytest`
-- 打包 exe：`python scripts/build_exe.py`
+- 打包 exe：`scripts/build_exe.bat`
 - 启动 debug 客户端：`python scripts/start_debug_client.py DEBUG`
 - 启动双开验证：`python scripts/start_dev_pair.py`
 
@@ -79,9 +82,12 @@
 - `git status --short`
 
 每次生成 commit 后，额外执行：
-- `python scripts/build_exe.py`
-- 正式版 exe 冒烟启动：`dist/LocalNetFTP.exe`
-- debug 版 exe 冒烟启动：`dist/LocalNetFTP.exe --dev-instance DEBUG`
+- Python 正式版冒烟启动：`python -m localnetftp`
+- Python debug 版冒烟启动：`python -m localnetftp --dev-instance DEBUG`
+
+不要在每次 commit 后自动执行 Nuitka 打包。需要打包时手动运行：
+- `scripts/build_exe.bat`
+- 或 `python scripts/build_exe.py`
 
 涉及 iroh、公网 ticket、Nuitka 打包或 DLL 加载时，还必须做一次 iroh ticket 本机烟测：生成 ticket、接收 ticket、确认文件保存成功。若因为网络环境限制无法验证公网链路，必须在最终回复中明确说明限制和已完成的本机验证范围。
 

@@ -1426,23 +1426,56 @@ def _show_widget_near_tray(widget, app, tray_icon, stack_index: int = 0) -> None
         widget.show()
         return
 
-    available = screen.availableGeometry()
+    work_area = _work_area_bounds(screen)
     if has_tray_geometry:
-        x = tray_geometry.right() - widget.width()
-        if tray_geometry.center().y() >= available.center().y():
+        if tray_geometry.center().y() >= (work_area["top"] + work_area["bottom"]) // 2:
             y = tray_geometry.top() - widget.height() - margin - stack_index * (widget.height() + gap)
         else:
             y = tray_geometry.bottom() + margin + stack_index * (widget.height() + gap)
     else:
-        x = available.right() - widget.width() - margin
-        y = available.bottom() - widget.height() - margin - stack_index * (widget.height() + gap)
+        y = work_area["bottom"] - widget.height() - margin - stack_index * (widget.height() + gap)
 
-    min_x = available.left() + margin
-    max_x = available.right() - widget.width() - margin
-    min_y = available.top() + margin
-    max_y = available.bottom() - widget.height() - margin
+    x = work_area["right"] - widget.width() - margin
+    min_x = work_area["left"] + margin
+    max_x = work_area["right"] - widget.width() - margin
+    min_y = work_area["top"] + margin
+    max_y = work_area["bottom"] - widget.height() - margin
     widget.move(_clamp(x, min_x, max_x), _clamp(y, min_y, max_y))
     widget.show()
+
+
+def _work_area_bounds(screen) -> dict[str, int]:
+    if sys.platform == "win32":
+        windows_bounds = _windows_work_area_bounds()
+        if windows_bounds is not None:
+            return windows_bounds
+
+    available = screen.availableGeometry()
+    return {
+        "left": available.left(),
+        "top": available.top(),
+        "right": available.right(),
+        "bottom": available.bottom(),
+    }
+
+
+def _windows_work_area_bounds() -> dict[str, int] | None:
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except ImportError:
+        return None
+
+    rect = wintypes.RECT()
+    SPI_GETWORKAREA = 0x0030
+    if not ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0):
+        return None
+    return {
+        "left": rect.left,
+        "top": rect.top,
+        "right": rect.right - 1,
+        "bottom": rect.bottom - 1,
+    }
 
 
 def _clamp(value: int, minimum: int, maximum: int) -> int:
