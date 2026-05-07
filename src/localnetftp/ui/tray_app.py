@@ -977,10 +977,12 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             else:
                 self.message.setText(f"正在接收文件 {percent}%")
             self.progress.setValue(percent)
+            QTimer.singleShot(0, position_received_toasts)
 
         def set_internet_progress(self, progress: InternetTransferProgress) -> None:
             self.message.setText(_internet_progress_text(progress))
             self.progress.setValue(_internet_progress_percent(progress))
+            QTimer.singleShot(0, position_received_toasts)
 
         def complete(self, result: ReceiveResult) -> None:
             self.paths = result.paths
@@ -997,6 +999,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if self._preview_widget_ref is not None:
                 self._layout.insertWidget(2, self._preview_widget_ref)
             self.adjustSize()
+            QTimer.singleShot(0, position_received_toasts)
 
         def show_near_tray(self, app: QApplication, tray_icon: QSystemTrayIcon | None, stack_index: int = 0) -> None:
             if self._manually_moved:

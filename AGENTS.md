@@ -59,6 +59,7 @@
   - `scripts/build_exe.bat`
   - 或 `python scripts/build_exe.py`
 - 每次完成代码或文档修改后必须同时启动 Python 正式版和 Python debug 版做冒烟验证：
+  - 启动前先结束已有的 LocalNetFTP Python 实例，避免端口占用和旧 UI 干扰验证。
   - 正式版：启动 `python -m localnetftp`，等待数秒确认进程仍在运行，不要关闭该进程。
   - debug 版：启动 `python -m localnetftp --dev-instance DEBUG`，等待数秒确认进程仍在运行，不要关闭该进程。
   - 如需手动 debug，可额外运行 `python scripts/start_debug_client.py DEBUG`。
@@ -82,6 +83,7 @@
 - `git status --short`
 
 每次生成 commit 后，额外执行：
+- 结束已有 LocalNetFTP Python 实例。
 - Python 正式版冒烟启动：`python -m localnetftp`
 - Python debug 版冒烟启动：`python -m localnetftp --dev-instance DEBUG`
 - 冒烟启动后的进程必须保持运行，除非用户明确要求关闭。
