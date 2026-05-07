@@ -64,7 +64,7 @@ def _dev_transfer_port(instance_name: str) -> int:
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtCore import QObject, QTimer, Qt, Signal
-    from PySide6.QtGui import QAction, QKeySequence
+    from PySide6.QtGui import QAction, QKeySequence, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -103,11 +103,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             super().mousePressEvent(event)
 
     class PasteInput(QLineEdit):
-        def __init__(self, on_paste) -> None:
+        def __init__(self, on_paste, on_submit) -> None:
             super().__init__()
             self._on_paste = on_paste
+            self._on_submit = on_submit
             self.setObjectName("pasteInput")
-            self.setPlaceholderText("粘贴文字 / 图片 / 文件")
+            self.setPlaceholderText("输入文字回车 / 粘贴文字图片文件")
+            self.returnPressed.connect(self._submit_text)
 
         def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt method name
             if event.matches(QKeySequence.Paste):
@@ -115,6 +117,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 event.accept()
                 return
             super().keyPressEvent(event)
+
+        def _submit_text(self) -> None:
+            self._on_submit()
 
     class UiEvents(QObject):
         received = Signal(object)
@@ -314,7 +319,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
-            self.paste_input = PasteInput(self._paste_clipboard)
+            self.paste_input = PasteInput(self._paste_clipboard, self._send_typed_text)
             self.transfer_status = QLabel("")
             self.transfer_status.setObjectName("transferStatus")
             self.transfer_progress = QProgressBar()
@@ -402,6 +407,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if paths:
                 self.paste_input.clear()
                 self._confirm_and_send(paths)
+
+        def _send_typed_text(self) -> None:
+            text = self.paste_input.text()
+            if not text.strip():
+                return
+            clipboard_dir = self._runtime.config_dir / "clipboard"
+            clipboard_dir.mkdir(parents=True, exist_ok=True)
+            path = timestamped_clipboard_path(clipboard_dir, ".txt")
+            path.write_text(text, encoding="utf-8")
+            self.paste_input.clear()
+            self._confirm_and_send([path])
 
         def _paths_from_clipboard(self) -> list[Path]:
             clipboard = QApplication.clipboard()
@@ -592,16 +608,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
             self._peers_by_row = {}
-            self._internet_row = self.peer_list.count()
-            self.peer_list.addItem("局域网外用户（生成 ticket）")
-            if "局域网外用户" in selected_names:
-                self.peer_list.item(self._internet_row).setSelected(True)
 
             peers = self._runtime.peers()
-            if not peers:
-                self._update_send_button()
-                return
-
             for peer in peers:
                 row = self.peer_list.count()
                 peer_name = peer.identity.device_name
@@ -609,6 +617,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.peer_list.addItem(f"{peer_name}  {peer.address}:{peer.identity.listen_port}")
                 if peer_name in selected_names:
                     self.peer_list.item(row).setSelected(True)
+
+            self._internet_row = self.peer_list.count()
+            self.peer_list.addItem("局域网外用户（生成 ticket）")
+            if "局域网外用户" in selected_names:
+                self.peer_list.item(self._internet_row).setSelected(True)
             self._update_send_button()
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
@@ -790,7 +803,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowFlag(Qt.FramelessWindowHint, True)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setAttribute(Qt.WA_ShowWithoutActivating, True)
-            self.setFixedWidth(320)
+            self.setFixedWidth(340)
 
             title = QLabel("收到文件")
             title.setObjectName("toastTitle")
@@ -807,6 +820,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             message = QLabel(_received_message(self.paths))
             message.setObjectName("toastMessage")
             message.setWordWrap(True)
+            preview_widget = self._preview_widget()
 
             open_folder = QPushButton("打开保存位置")
             open_folder.clicked.connect(self._open_save_location)
@@ -822,12 +836,46 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.setSpacing(8)
             layout.addLayout(title_layout)
             layout.addWidget(message)
+            if preview_widget is not None:
+                layout.addWidget(preview_widget)
             layout.addLayout(button_layout)
 
             self.setStyleSheet(_toast_stylesheet())
-            QTimer.singleShot(6500, self.close)
 
-        def show_near_tray(self, app: QApplication) -> None:
+        def _preview_widget(self):
+            if len(self.paths) != 1 or not self.paths[0].is_file():
+                return None
+            path = self.paths[0]
+            if _is_image_preview_path(path):
+                pixmap = QPixmap(str(path))
+                if pixmap.isNull():
+                    return None
+                preview = QLabel()
+                preview.setObjectName("toastImagePreview")
+                preview.setAlignment(Qt.AlignCenter)
+                preview.setPixmap(pixmap.scaled(316, 180, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                return preview
+            if _is_text_preview_path(path):
+                text = _read_text_preview(path)
+                if text is None:
+                    return None
+                container = QWidget()
+                container.setObjectName("toastPreviewContainer")
+                text_box = QPlainTextEdit(text)
+                text_box.setObjectName("toastTextPreview")
+                text_box.setReadOnly(True)
+                text_box.setFixedHeight(92)
+                copy_button = QPushButton("复制文字")
+                copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text_box.toPlainText()))
+                layout = QVBoxLayout(container)
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(6)
+                layout.addWidget(text_box)
+                layout.addWidget(copy_button, alignment=Qt.AlignRight)
+                return container
+            return None
+
+        def show_near_tray(self, app: QApplication, stack_index: int = 0) -> None:
             screen = app.primaryScreen()
             if screen is None:
                 self.show()
@@ -835,8 +883,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.adjustSize()
             geometry = screen.availableGeometry()
             margin = 16
+            gap = 8
             x = geometry.right() - self.width() - margin
-            y = geometry.bottom() - self.height() - margin
+            y = geometry.bottom() - self.height() - margin - stack_index * (self.height() + gap)
             self.move(max(geometry.left(), x), max(geometry.top(), y))
             self.show()
 
@@ -857,8 +906,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         toast = ReceiveToast(result)
         active_toasts.append(toast)
-        toast.destroyed.connect(lambda: active_toasts.remove(toast) if toast in active_toasts else None)
-        toast.show_near_tray(app)
+        toast.destroyed.connect(lambda *_: remove_received_toast(toast))
+        position_received_toasts()
+
+    def remove_received_toast(toast: ReceiveToast) -> None:
+        if toast in active_toasts:
+            active_toasts.remove(toast)
+            position_received_toasts()
+
+    def position_received_toasts() -> None:
+        for index, toast in enumerate(reversed(active_toasts)):
+            toast.show_near_tray(app, index)
 
     ticket_windows: list[TicketWindow] = []
     receive_progress_windows: list[ReceiveProgressWindow] = []
@@ -1013,6 +1071,33 @@ def _received_message(paths: list[Path]) -> str:
     return f"已保存 {len(paths)} 个项目：\n" + "\n".join(path.name for path in paths[:8])
 
 
+def _is_image_preview_path(path: Path) -> bool:
+    return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+
+
+def _is_text_preview_path(path: Path) -> bool:
+    return path.suffix.lower() in {".txt", ".md", ".log", ".csv", ".json", ".py", ".ini", ".yaml", ".yml"}
+
+
+def _read_text_preview(path: Path, max_bytes: int = 64 * 1024) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = data.decode("gbk")
+        except UnicodeDecodeError:
+            return None
+    if len(text) > 4000:
+        return f"{text[:4000]}\n..."
+    return text
+
+
 def _open_item_button_text(paths: list[Path]) -> str:
     if len(paths) == 1 and paths[0].is_dir():
         return "打开文件夹"
@@ -1072,6 +1157,24 @@ def _toast_stylesheet() -> str:
     }
     QLabel#toastMessage {
         color: #465568;
+    }
+    QLabel#toastImagePreview {
+        min-height: 80px;
+        max-height: 180px;
+        border-radius: 6px;
+        background-color: rgba(241, 245, 249, 230);
+    }
+    QWidget#toastPreviewContainer {
+        border: 0;
+        background-color: transparent;
+    }
+    QPlainTextEdit#toastTextPreview {
+        padding: 6px;
+        border: 1px solid rgba(148, 163, 184, 150);
+        border-radius: 6px;
+        background-color: rgba(255, 255, 255, 235);
+        color: #172033;
+        selection-background-color: #bfdbfe;
     }
     QPushButton {
         min-height: 26px;
