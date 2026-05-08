@@ -63,7 +63,7 @@ def _dev_transfer_port(instance_name: str) -> int:
 
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
-    from PySide6.QtCore import QObject, QPoint, QTimer, Qt, Signal
+    from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QKeySequence, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -311,9 +311,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowFlag(Qt.Tool, True)
             self.setWindowFlag(Qt.FramelessWindowHint, True)
             self._initial_position_applied = False
+            self._drag_offset: QPoint | None = None
 
             self.device_name = NameEdit(self._runtime.config.device_name)
             self.device_name.editingFinished.connect(self._save_device_name)
+            self.device_name.installEventFilter(self)
             close_button = QPushButton("×")
             close_button.setObjectName("floatingClose")
             close_button.setToolTip("关闭")
@@ -396,6 +398,41 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 event.acceptProposedAction()
             else:
                 event.ignore()
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.button() == Qt.LeftButton and self._can_start_drag(event.position().toPoint()):
+                self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                event.accept()
+                return
+            super().mousePressEvent(event)
+
+        def mouseMoveEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            if event.buttons() & Qt.LeftButton and self._drag_offset is not None:
+                self.move(event.globalPosition().toPoint() - self._drag_offset)
+                event.accept()
+                return
+            super().mouseMoveEvent(event)
+
+        def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._drag_offset = None
+            super().mouseReleaseEvent(event)
+
+        def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt method name
+            if watched is self.device_name:
+                if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                    self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                    return False
+                if event.type() == QEvent.MouseMove and event.buttons() & Qt.LeftButton and self._drag_offset is not None:
+                    self.move(event.globalPosition().toPoint() - self._drag_offset)
+                    return True
+                if event.type() == QEvent.MouseButtonRelease:
+                    self._drag_offset = None
+                    return False
+            return super().eventFilter(watched, event)
+
+        def _can_start_drag(self, position) -> bool:
+            child = self.childAt(position)
+            return child is None or child in (self.device_name, self.transfer_status)
 
         def _save_device_name(self) -> None:
             device_name = self.device_name.text().strip()
