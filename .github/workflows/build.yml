@@ -1,11 +1,24 @@
-name: Build exe
+name: Test and Package
 
 on:
   push:
+    branches:
+      - master
+    tags:
+      - "v*"
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: localnetftp-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-windows:
+  test:
+    name: Test
     runs-on: windows-latest
 
     steps:
@@ -16,6 +29,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: python -m pip install -r requirements-dev.txt
@@ -23,11 +37,41 @@ jobs:
       - name: Run tests
         run: python -m pytest
 
-      - name: Build exe
+      - name: Verify local transfer
+        run: python scripts/verify_local_transfer.py
+
+  package-windows:
+    name: Package Windows exe
+    runs-on: windows-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Build exe with Nuitka
         run: python scripts/build_exe.py
 
-      - name: Upload artifact
+      - name: Verify artifact exists
+        run: |
+          if (!(Test-Path dist/LocalNetFTP.exe)) {
+            throw "dist/LocalNetFTP.exe was not created."
+          }
+
+      - name: Upload packaged exe
         uses: actions/upload-artifact@v4
         with:
-          name: LocalNetFTP-windows
+          name: LocalNetFTP-windows-${{ github.sha }}
           path: dist/LocalNetFTP.exe
+          if-no-files-found: error
+          retention-days: 14
