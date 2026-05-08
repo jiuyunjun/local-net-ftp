@@ -309,10 +309,21 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowOpacity(0.92)
             self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
             self.setWindowFlag(Qt.Tool, True)
+            self.setWindowFlag(Qt.FramelessWindowHint, True)
             self._initial_position_applied = False
 
             self.device_name = NameEdit(self._runtime.config.device_name)
             self.device_name.editingFinished.connect(self._save_device_name)
+            close_button = QPushButton("×")
+            close_button.setObjectName("floatingClose")
+            close_button.setToolTip("关闭")
+            close_button.clicked.connect(self.hide)
+
+            title_layout = QHBoxLayout()
+            title_layout.setContentsMargins(0, 0, 4, 0)
+            title_layout.setSpacing(4)
+            title_layout.addWidget(self.device_name, 1)
+            title_layout.addWidget(close_button)
 
             self.peer_list = QListWidget()
             self.peer_list.setAlternatingRowColors(True)
@@ -332,7 +343,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout = QVBoxLayout(self)
             layout.setContentsMargins(8, 8, 8, 8)
             layout.setSpacing(6)
-            layout.addWidget(self.device_name)
+            layout.addLayout(title_layout)
             layout.addWidget(self.peer_list, 1)
             layout.addWidget(self.paste_input)
             layout.addWidget(self.transfer_status)
@@ -1014,7 +1025,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 text_box.setReadOnly(True)
                 text_box.setFixedHeight(92)
                 copy_button = QPushButton("复制文字")
-                copy_button.clicked.connect(lambda: QApplication.clipboard().setText(text_box.toPlainText()))
+                copy_button.clicked.connect(lambda: self._copy_preview_text(text_box, copy_button))
                 layout = QVBoxLayout(container)
                 layout.setContentsMargins(0, 0, 0, 0)
                 layout.setSpacing(6)
@@ -1022,6 +1033,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 layout.addWidget(copy_button, alignment=Qt.AlignRight)
                 return container
             return None
+
+        def _copy_preview_text(self, text_box: QPlainTextEdit, copy_button: QPushButton) -> None:
+            QApplication.clipboard().setText(text_box.toPlainText())
+            copy_button.setText("已复制")
+            QTimer.singleShot(1600, lambda: copy_button.setText("复制文字"))
 
         def set_progress(self, progress: ReceiveProgress) -> None:
             percent = _transfer_progress_percent(progress.bytes_done, progress.total_bytes)
@@ -1714,6 +1730,22 @@ def _floating_stylesheet() -> str:
     QLineEdit#floatingName:focus {
         border: 1px solid rgba(132, 146, 166, 140);
         background-color: rgba(255, 255, 255, 230);
+    }
+    QPushButton#floatingClose {
+        min-width: 24px;
+        max-width: 24px;
+        min-height: 24px;
+        max-height: 24px;
+        padding: 0;
+        border-radius: 12px;
+        border: 0;
+        background-color: transparent;
+        color: #475569;
+        font-size: 16px;
+    }
+    QPushButton#floatingClose:hover {
+        background-color: rgba(226, 232, 240, 220);
+        color: #b91c1c;
     }
     QLineEdit#pasteInput {
         min-height: 28px;
