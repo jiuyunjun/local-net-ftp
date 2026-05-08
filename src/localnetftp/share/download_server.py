@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import socket
 import subprocess
+import tempfile
 import threading
+import zipfile
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from flask import Flask, abort, send_file
+from flask import Flask, abort, request, send_file
 from werkzeug.serving import make_server
 
 
@@ -176,6 +178,7 @@ class MobileFileShareServer:
         self._server = None
         self._thread: threading.Thread | None = None
         self._files: dict[str, Path] = {}
+        self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -189,10 +192,11 @@ class MobileFileShareServer:
         @app.get("/")
         def index():
             items = "\n".join(
-                f"""<a class="file" href="/download/{escape(file_id)}">
+                f"""<label class="file">
+  <input type="checkbox" value="{escape(file_id)}">
   <span>{escape(path.name)}</span>
   <small>{escape(_format_file_size(path.stat().st_size))}</small>
-</a>"""
+</label>"""
                 for file_id, path in self._files.items()
             )
             return f"""<!doctype html>
@@ -222,10 +226,29 @@ class MobileFileShareServer:
       margin: 0 0 18px;
       color: #5b687a;
     }}
+    .actions {{
+      display: flex;
+      gap: 10px;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }}
+    button {{
+      min-height: 40px;
+      padding: 0 14px;
+      border: 1px solid #9aa8ba;
+      border-radius: 8px;
+      background: white;
+      color: #172033;
+      font-weight: 600;
+    }}
+    button.primary {{
+      border-color: #2f7dd1;
+      background: #2f7dd1;
+      color: white;
+    }}
     .file {{
       display: flex;
       align-items: center;
-      justify-content: space-between;
       gap: 14px;
       min-height: 54px;
       margin-bottom: 10px;
@@ -237,7 +260,13 @@ class MobileFileShareServer:
       text-decoration: none;
       box-shadow: 0 10px 26px rgba(31, 45, 61, 0.08);
     }}
+    .file input {{
+      width: 20px;
+      height: 20px;
+      flex: 0 0 auto;
+    }}
     .file span {{
+      flex: 1 1 auto;
       overflow-wrap: anywhere;
       font-weight: 600;
     }}
@@ -250,9 +279,55 @@ class MobileFileShareServer:
 <body>
   <main>
     <h1>LocalNetFTP</h1>
-    <p>点击文件下载</p>
+    <p>选择文件下载</p>
+    <div class="actions">
+      <button type="button" onclick="selectAll()">全选</button>
+      <button type="button" class="primary" onclick="downloadSelected()">下载选中</button>
+      <button type="button" onclick="downloadZip()">打包 ZIP</button>
+    </div>
     {items}
   </main>
+  <script>
+    function selectedIds() {{
+      return Array.from(document.querySelectorAll('input[type="checkbox"]:checked')).map(item => item.value);
+    }}
+    function selectAll() {{
+      const boxes = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+      const shouldCheck = boxes.some(item => !item.checked);
+      boxes.forEach(item => item.checked = shouldCheck);
+    }}
+    function isSafari() {{
+      const ua = navigator.userAgent;
+      return /Safari/i.test(ua) && !/Chrome|Chromium|CriOS|FxiOS|Edg|OPR/i.test(ua);
+    }}
+    function downloadSelected() {{
+      const ids = selectedIds();
+      if (ids.length === 0) return;
+      if (ids.length === 1) {{
+        window.location.href = '/download/' + encodeURIComponent(ids[0]);
+        return;
+      }}
+      if (isSafari()) {{
+        window.location.href = '/download.zip?ids=' + encodeURIComponent(ids.join(','));
+        return;
+      }}
+      ids.forEach((id, index) => {{
+        window.setTimeout(() => {{
+          const link = document.createElement('a');
+          link.href = '/download/' + encodeURIComponent(id);
+          link.download = '';
+          document.body.appendChild(link);
+          link.click();
+          link.remove();
+        }}, index * 250);
+      }});
+    }}
+    function downloadZip() {{
+      const ids = selectedIds();
+      if (ids.length === 0) return;
+      window.location.href = '/download.zip?ids=' + encodeURIComponent(ids.join(','));
+    }}
+  </script>
 </body>
 </html>"""
 
@@ -262,6 +337,14 @@ class MobileFileShareServer:
             if path is None or not path.exists():
                 abort(404)
             return send_file(path, as_attachment=True, download_name=path.name)
+
+        @app.get("/download.zip")
+        def download_zip():
+            paths = self._selected_paths(request.args.get("ids", ""))
+            if not paths:
+                abort(404)
+            zip_path = self._make_zip(paths)
+            return send_file(zip_path, as_attachment=True, download_name=zip_path.name)
 
         self._server = make_server(self.host, self.port, app, threaded=True)
         self._thread = threading.Thread(
@@ -278,9 +361,32 @@ class MobileFileShareServer:
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+            self._temp_dir = None
 
     def urls(self) -> list[ShareAddress]:
         return lan_download_urls(self.port, "LocalNetFTP", None)
+
+    def _selected_paths(self, raw_ids: str) -> list[Path]:
+        if not raw_ids:
+            return []
+        paths: list[Path] = []
+        for file_id in raw_ids.split(","):
+            path = self._files.get(file_id.strip())
+            if path is not None and path.exists():
+                paths.append(path)
+        return paths
+
+    def _make_zip(self, paths: list[Path]) -> Path:
+        if self._temp_dir is None:
+            self._temp_dir = tempfile.TemporaryDirectory(prefix="localnetftp-mobile-")
+        zip_path = Path(self._temp_dir.name) / "LocalNetFTP-files.zip"
+        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            used_names: set[str] = set()
+            for path in paths:
+                archive.write(path, _zip_arcname(path, used_names))
+        return zip_path
 
 
 def _share_files(paths: list[Path]) -> dict[str, Path]:
@@ -309,6 +415,19 @@ def _format_file_size(size: int) -> str:
         if value < 1024 or unit == "TB":
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
+
+
+def _zip_arcname(path: Path, used_names: set[str]) -> str:
+    base_name = path.name or "file"
+    candidate = base_name
+    counter = 2
+    while candidate.casefold() in used_names:
+        stem = path.stem or "file"
+        suffix = path.suffix
+        candidate = f"{stem}_{counter}{suffix}"
+        counter += 1
+    used_names.add(candidate.casefold())
+    return candidate
 
 
 def _is_lan_address(address: str) -> bool:

@@ -1,7 +1,9 @@
 from localnetftp.share.download_server import _normalize_interface_name, lan_download_urls
 from localnetftp.share import DownloadShareServer, MobileFileShareServer
+import io
 import socket
 import urllib.request
+import zipfile
 
 
 def test_lan_download_urls_builds_links_for_addresses():
@@ -46,10 +48,34 @@ def test_mobile_file_share_server_serves_original_files(tmp_path):
     finally:
         server.stop()
 
-    assert "点击文件下载" in html
+    assert "选择文件下载" in html
     assert "a.txt" in html
     assert "b.txt" in html
+    assert "下载选中" in html
+    assert "打包 ZIP" in html
+    assert "function isSafari()" in html
     assert data == b"updated"
+
+
+def test_mobile_file_share_server_serves_selected_zip(tmp_path):
+    first = tmp_path / "same.txt"
+    first.write_text("first", encoding="utf-8")
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    second = folder / "same.txt"
+    second.write_text("second", encoding="utf-8")
+    port = _free_port()
+    server = MobileFileShareServer([first, folder], port=port, host="127.0.0.1")
+    server.start()
+    try:
+        data = urllib.request.urlopen(f"http://127.0.0.1:{port}/download.zip?ids=1,2", timeout=5).read()
+    finally:
+        server.stop()
+
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        assert sorted(archive.namelist()) == ["same.txt", "same_2.txt"]
+        assert archive.read("same.txt") == b"first"
+        assert archive.read("same_2.txt") == b"second"
 
 
 def test_normalize_interface_name_repairs_ethernet_question_marks():
