@@ -23,7 +23,7 @@ from localnetftp.internet_transfer import (
     InternetTransferProgress,
 )
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
-from localnetftp.share import DownloadShareServer, ShareAddress
+from localnetftp.share import DownloadShareServer, MobileFileShareServer, ShareAddress
 from localnetftp.transfer import ReceiveProgress, ReceiveResult, TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
@@ -64,11 +64,12 @@ def _dev_transfer_port(instance_name: str) -> int:
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
-    from PySide6.QtGui import QAction, QKeySequence, QPixmap
+    from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
         QFileDialog,
+        QFrame,
         QHBoxLayout,
         QLabel,
         QLineEdit,
@@ -76,6 +77,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         QMenu,
         QMessageBox,
         QPushButton,
+        QScrollArea,
         QPlainTextEdit,
         QProgressBar,
         QStyle,
@@ -85,6 +87,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     )
 
     SHARE_PORT = 49300
+    MOBILE_SHARE_PORT = 49301
+    MOBILE_SHARE_NAME = "局域网内手机用户"
     runtime_options = options or RuntimeOptions()
 
     class NameEdit(QLineEdit):
@@ -130,6 +134,25 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         internet_progress = Signal(object)
         show_floating = Signal()
 
+    def _qr_pixmap(text: str, scale: int) -> QPixmap:
+        import qrcode
+
+        qr = qrcode.QRCode(border=2, box_size=1)
+        qr.add_data(text)
+        qr.make(fit=True)
+        matrix = qr.get_matrix()
+        size = len(matrix) * scale
+        image = QImage(size, size, QImage.Format_RGB32)
+        image.fill(0xFFFFFFFF)
+        for row_index, row in enumerate(matrix):
+            for column_index, dark in enumerate(row):
+                if not dark:
+                    continue
+                for y in range(row_index * scale, (row_index + 1) * scale):
+                    for x in range(column_index * scale, (column_index + 1) * scale):
+                        image.setPixel(x, y, 0xFF172033)
+        return QPixmap.fromImage(image)
+
     class AppRuntime:
         def __init__(self) -> None:
             self.options = runtime_options
@@ -139,6 +162,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.discovery_service: DiscoveryService | None = None
             self.transfer_server: TransferServer | None = None
             self.share_server: DownloadShareServer | None = None
+            self.mobile_share_server: MobileFileShareServer | None = None
             self.internet_providers: list[IrohTicketProvider] = []
             self.internet_receivers: list[IrohTicketReceiver] = []
             self.local_peer_registry = (
@@ -178,6 +202,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.stop_discovery()
             self.stop_transfer_server()
             self.stop_share_server()
+            self.stop_mobile_share_server()
             self.stop_internet_providers()
 
         def save_settings(self, config: AppConfig) -> str:
@@ -262,6 +287,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.share_server.stop()
                 self.share_server = None
 
+        def start_mobile_share_server(self, paths: list[Path]) -> MobileFileShareServer:
+            self.stop_mobile_share_server()
+            self.mobile_share_server = MobileFileShareServer(paths, port=MOBILE_SHARE_PORT)
+            self.mobile_share_server.start()
+            return self.mobile_share_server
+
+        def stop_mobile_share_server(self) -> None:
+            if self.mobile_share_server is not None:
+                self.mobile_share_server.stop()
+                self.mobile_share_server = None
+
         def start_internet_provider(self, paths: list[Path]) -> None:
             provider = IrohTicketProvider(
                 paths,
@@ -300,6 +336,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             super().__init__()
             self._runtime = runtime
             self._peers_by_row = {}
+            self._mobile_row: int | None = None
             self._internet_row: int | None = None
 
             self.setWindowTitle("LocalNetFTP")
@@ -496,6 +533,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def _selected_peer_names(self) -> list[str]:
             names = [peer.identity.device_name for peer in self._selected_peers()]
+            if self._is_mobile_selected():
+                names.append(MOBILE_SHARE_NAME)
             if self._is_internet_selected():
                 names.append("局域网外用户")
             return names
@@ -514,14 +553,22 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 return False
             return any(self.peer_list.row(item) == self._internet_row for item in self.peer_list.selectedItems())
 
+        def _is_mobile_selected(self) -> bool:
+            if self._mobile_row is None:
+                return False
+            return any(self.peer_list.row(item) == self._mobile_row for item in self.peer_list.selectedItems())
+
         def _update_send_button(self) -> None:
             return
 
         def _confirm_and_send(self, paths: list[Path]) -> None:
             peers = self._selected_peers()
             peer_names = [peer.identity.device_name for peer in peers]
+            mobile_selected = self._is_mobile_selected()
             internet_selected = self._is_internet_selected()
             display_names = list(peer_names)
+            if mobile_selected:
+                display_names.append(MOBILE_SHARE_NAME)
             if internet_selected:
                 display_names.append("局域网外用户")
             if not can_send(len(display_names), len(paths)):
@@ -540,6 +587,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 if result != QMessageBox.Ok:
                     self._update_send_button()
                     return
+
+            if mobile_selected:
+                self.transfer_status.setText("正在生成手机网页下载地址...")
+                self._show_progress(0)
+                show_mobile_share_window(paths)
 
             if internet_selected:
                 self.transfer_status.setText("正在生成公网 ticket...")
@@ -601,6 +653,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             selected_names = set(self._selected_peer_names())
             self.peer_list.clear()
             self._peers_by_row = {}
+            self._mobile_row = None
 
             peers = self._runtime.peers()
             for peer in peers:
@@ -610,6 +663,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.peer_list.addItem(f"{peer_name}  {peer.address}:{peer.identity.listen_port}")
                 if peer_name in selected_names:
                     self.peer_list.item(row).setSelected(True)
+
+            self._mobile_row = self.peer_list.count()
+            self.peer_list.addItem("局域网内手机用户（网页）")
+            if MOBILE_SHARE_NAME in selected_names:
+                self.peer_list.item(self._mobile_row).setSelected(True)
 
             self._internet_row = self.peer_list.count()
             self.peer_list.addItem("局域网外用户（生成 ticket）")
@@ -724,6 +782,93 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             url = text[text.index("http://") :]
             QApplication.clipboard().setText(url)
             self.copy_status.setText("已复制")
+
+    class MobileShareWindow(QWidget):
+        def __init__(self, runtime: AppRuntime, server: MobileFileShareServer) -> None:
+            super().__init__()
+            self._runtime = runtime
+            self._server = server
+            self.setWindowTitle("手机网页下载")
+            self.setMinimumSize(520, 420)
+
+            title = QLabel("手机网页下载")
+            title.setObjectName("titleLabel")
+            label = QLabel("窗口存在期间，手机可访问这些网址下载文件。")
+            label.setObjectName("mutedLabel")
+            self.status = QLabel("扫描二维码，或点击网址复制")
+            self.status.setObjectName("statusLabel")
+
+            self.address_layout = QVBoxLayout()
+            self.address_layout.setContentsMargins(0, 0, 0, 0)
+            self.address_layout.setSpacing(10)
+            address_container = QWidget()
+            address_container.setLayout(self.address_layout)
+
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            scroll_area.setWidget(address_container)
+
+            close_button = QPushButton("停止分享")
+            close_button.clicked.connect(self.close)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            layout.addWidget(title)
+            layout.addWidget(label)
+            layout.addWidget(scroll_area, 1)
+            layout.addWidget(self.status)
+            layout.addWidget(close_button, alignment=Qt.AlignRight)
+            self.setStyleSheet(_app_stylesheet())
+            self._set_urls(server.urls())
+
+        def _set_urls(self, urls: list[ShareAddress]) -> None:
+            while self.address_layout.count():
+                item = self.address_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            if not urls:
+                self.address_layout.addWidget(QLabel("未找到可用局域网地址"))
+                return
+            for address in urls:
+                self.address_layout.addWidget(self._address_widget(address))
+            self.address_layout.addStretch(1)
+
+        def _address_widget(self, address: ShareAddress) -> QWidget:
+            card = QWidget()
+            card.setObjectName("shareAddressCard")
+
+            interface_label = QLabel(address.interface_name)
+            interface_label.setObjectName("shareInterfaceLabel")
+            url_button = QPushButton(address.url)
+            url_button.setObjectName("linkButton")
+            url_button.clicked.connect(lambda: self._copy_url(address.url))
+            qr_label = QLabel()
+            qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setPixmap(_qr_pixmap(address.url, 4))
+
+            text_layout = QVBoxLayout()
+            text_layout.setContentsMargins(0, 0, 0, 0)
+            text_layout.setSpacing(6)
+            text_layout.addWidget(interface_label)
+            text_layout.addWidget(url_button)
+
+            row_layout = QHBoxLayout(card)
+            row_layout.setContentsMargins(10, 10, 10, 10)
+            row_layout.setSpacing(12)
+            row_layout.addWidget(qr_label)
+            row_layout.addLayout(text_layout, 1)
+            return card
+
+        def _copy_url(self, url: str) -> None:
+            QApplication.clipboard().setText(url)
+            self.status.setText("已复制网址")
+
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._runtime.stop_mobile_share_server()
+            super().closeEvent(event)
 
     class TicketWindow(QWidget):
         def __init__(self, runtime: AppRuntime, provider: IrohTicketProvider, ticket: InternetTicket) -> None:
@@ -1210,6 +1355,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     ticket_windows: list[TicketWindow] = []
     ticket_input_windows: list[TicketInputWindow] = []
+    mobile_share_windows: list[MobileShareWindow] = []
     receive_progress_windows: list[ReceiveProgressWindow] = []
     send_windows: list[SendProgressWindow] = []
 
@@ -1305,6 +1451,26 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window = TicketWindow(runtime, provider, ticket)
         ticket_windows.append(window)
         window.destroyed.connect(lambda: ticket_windows.remove(window) if window in ticket_windows else None)
+        window.setWindowIcon(icon)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+    def show_mobile_share_window(paths: list[Path]) -> None:
+        for window in list(mobile_share_windows):
+            window.close()
+        try:
+            server = runtime.start_mobile_share_server(paths)
+        except Exception as exc:
+            floating_window._reset_progress()
+            QMessageBox.warning(None, "LocalNetFTP", f"手机网页下载启动失败：{type(exc).__name__}: {exc}")
+            return
+        floating_window._finish_progress("手机网页下载已生成")
+        window = MobileShareWindow(runtime, server)
+        mobile_share_windows.append(window)
+        window.destroyed.connect(
+            lambda *_: mobile_share_windows.remove(window) if window in mobile_share_windows else None
+        )
         window.setWindowIcon(icon)
         window.show()
         window.raise_()
@@ -1722,6 +1888,27 @@ def _app_stylesheet() -> str:
     }
     QListWidget {
         min-height: 120px;
+    }
+    QWidget#shareAddressCard {
+        border: 1px solid rgba(148, 163, 184, 130);
+        border-radius: 8px;
+        background-color: rgba(255, 255, 255, 245);
+    }
+    QLabel#shareInterfaceLabel {
+        font-weight: 600;
+        color: #172033;
+    }
+    QPushButton#linkButton {
+        min-height: 30px;
+        padding: 3px 8px;
+        border: 1px solid transparent;
+        background-color: transparent;
+        color: #2f7dd1;
+        text-align: left;
+    }
+    QPushButton#linkButton:hover {
+        border-color: rgba(47, 125, 209, 90);
+        background-color: #eef5ff;
     }
     QProgressBar#inlineProgress {
         min-height: 8px;

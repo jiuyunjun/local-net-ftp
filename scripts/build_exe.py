@@ -32,6 +32,7 @@ def main() -> int:
         "--include-windows-runtime-dlls=auto",
         "--include-package=flask",
         "--include-package=iroh",
+        "--include-package=qrcode",
         _iroh_dll_arg(),  # iroh_ffi.dll must be at iroh/ so iroh_ffi.py finds it
         "--include-package=werkzeug",
         "--include-package=jinja2",

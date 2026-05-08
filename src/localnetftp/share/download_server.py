@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from html import escape
 from pathlib import Path
 
-from flask import Flask, send_file
+from flask import Flask, abort, send_file
 from werkzeug.serving import make_server
 
 
@@ -166,6 +166,149 @@ class DownloadShareServer:
 
     def urls(self) -> list[ShareAddress]:
         return lan_download_urls(self.port, self.file_path.name)
+
+
+class MobileFileShareServer:
+    def __init__(self, paths: list[Path], port: int = DEFAULT_SHARE_PORT + 1, host: str = "0.0.0.0") -> None:
+        self.paths = [path.resolve() for path in paths]
+        self.port = port
+        self.host = host
+        self._server = None
+        self._thread: threading.Thread | None = None
+        self._files: dict[str, Path] = {}
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._files = _share_files(self.paths)
+        if not self._files:
+            raise FileNotFoundError("No files to share.")
+
+        app = Flask(__name__)
+
+        @app.get("/")
+        def index():
+            items = "\n".join(
+                f"""<a class="file" href="/download/{escape(file_id)}">
+  <span>{escape(path.name)}</span>
+  <small>{escape(_format_file_size(path.stat().st_size))}</small>
+</a>"""
+                for file_id, path in self._files.items()
+            )
+            return f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LocalNetFTP 文件下载</title>
+  <style>
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #172033;
+    }}
+    main {{
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 28px 18px;
+    }}
+    h1 {{
+      margin: 0 0 6px;
+      font-size: 24px;
+    }}
+    p {{
+      margin: 0 0 18px;
+      color: #5b687a;
+    }}
+    .file {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      min-height: 54px;
+      margin-bottom: 10px;
+      padding: 0 14px;
+      border: 1px solid #d8e0ea;
+      border-radius: 8px;
+      background: white;
+      color: #172033;
+      text-decoration: none;
+      box-shadow: 0 10px 26px rgba(31, 45, 61, 0.08);
+    }}
+    .file span {{
+      overflow-wrap: anywhere;
+      font-weight: 600;
+    }}
+    .file small {{
+      flex: 0 0 auto;
+      color: #64748b;
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LocalNetFTP</h1>
+    <p>点击文件下载</p>
+    {items}
+  </main>
+</body>
+</html>"""
+
+        @app.get("/download/<file_id>")
+        def download(file_id: str):
+            path = self._files.get(file_id)
+            if path is None or not path.exists():
+                abort(404)
+            return send_file(path, as_attachment=True, download_name=path.name)
+
+        self._server = make_server(self.host, self.port, app, threaded=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="LocalNetFTPMobileShare",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def urls(self) -> list[ShareAddress]:
+        return lan_download_urls(self.port, "LocalNetFTP", None)
+
+
+def _share_files(paths: list[Path]) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+    counter = 1
+    for path in paths:
+        if not path.exists():
+            raise FileNotFoundError(path)
+        if path.is_file():
+            files[str(counter)] = path
+            counter += 1
+            continue
+        if path.is_dir():
+            for child in sorted(path.rglob("*")):
+                if child.is_file():
+                    files[str(counter)] = child
+                    counter += 1
+            continue
+        raise ValueError(f"Unsupported share path: {path}")
+    return files
+
+
+def _format_file_size(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
 
 
 def _is_lan_address(address: str) -> bool:
