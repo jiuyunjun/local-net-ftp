@@ -87,9 +87,14 @@ class TransferServer:
         self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._socket.settimeout(0.25)
         self._socket.bind((self._host, self._port))
+        self._port = self._socket.getsockname()[1]
         self._socket.listen()
         self._thread = threading.Thread(target=self._run, name="LocalNetFTPTransferServer", daemon=True)
         self._thread.start()
+
+    @property
+    def port(self) -> int:
+        return self._port
 
     def stop(self) -> None:
         self._stop_event.set()

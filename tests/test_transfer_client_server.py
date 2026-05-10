@@ -21,10 +21,10 @@ def test_send_paths_transfers_file_and_folder(tmp_path):
     single_file = tmp_path / "single.txt"
     single_file.write_text("world", encoding="utf-8")
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [source_dir, single_file])
+        send_paths("127.0.0.1", server.port, [source_dir, single_file])
         _wait_for(
             lambda: (receive_dir / "source" / "nested" / "a.txt").exists()
             and (receive_dir / "single.txt").exists()
@@ -46,10 +46,10 @@ def test_send_paths_reports_received_roots(tmp_path):
     single_file.write_text("world", encoding="utf-8")
     received = []
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port(), on_received=received.append)
+    server = TransferServer(receive_dir=receive_dir, port=0, on_received=received.append)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [source_dir, single_file])
+        send_paths("127.0.0.1", server.port, [source_dir, single_file])
         _wait_for(lambda: received)
     finally:
         server.stop()
@@ -63,10 +63,10 @@ def test_send_paths_reports_progress(tmp_path):
     single_file.write_text("world", encoding="utf-8")
     events = []
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [single_file], on_progress=events.append)
+        send_paths("127.0.0.1", server.port, [single_file], on_progress=events.append)
         _wait_for(lambda: (receive_dir / "single.txt").exists())
     finally:
         server.stop()
@@ -90,10 +90,10 @@ def test_send_paths_reports_aggregate_progress_for_multiple_files(tmp_path):
     second_file.write_bytes(b"b" * 5)
     events = []
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [source_dir], on_progress=events.append)
+        send_paths("127.0.0.1", server.port, [source_dir], on_progress=events.append)
         _wait_for(lambda: (receive_dir / "source" / "b.txt").exists())
     finally:
         server.stop()
@@ -111,10 +111,10 @@ def test_receiver_reports_progress(tmp_path):
     single_file.write_bytes(b"abc")
     received_progress = []
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port(), on_progress=received_progress.append)
+    server = TransferServer(receive_dir=receive_dir, port=0, on_progress=received_progress.append)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [single_file])
+        send_paths("127.0.0.1", server.port, [single_file])
         _wait_for(lambda: (receive_dir / "single.txt").exists())
     finally:
         server.stop()
@@ -132,11 +132,11 @@ def test_send_paths_can_cancel_before_file_transfer(tmp_path):
     cancel_event = threading.Event()
     cancel_event.set()
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
         try:
-            send_paths("127.0.0.1", server._port, [single_file], cancel_event=cancel_event)
+            send_paths("127.0.0.1", server.port, [single_file], cancel_event=cancel_event)
         except InterruptedError:
             pass
         else:
@@ -154,10 +154,10 @@ def test_send_paths_keeps_existing_file_when_names_conflict(tmp_path):
     single_file = tmp_path / "single.txt"
     single_file.write_text("new", encoding="utf-8")
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        send_paths("127.0.0.1", server._port, [single_file])
+        send_paths("127.0.0.1", server.port, [single_file])
         _wait_for(lambda: len(list(receive_dir.glob("single_*.txt"))) == 1)
     finally:
         server.stop()
@@ -172,14 +172,14 @@ def test_send_paths_resumes_partial_file(tmp_path):
     source_file = tmp_path / "large.bin"
     source_file.write_bytes(b"a" * 128 + b"b" * 128)
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        _send_partial_file(server._port, source_file, byte_count=128)
+        _send_partial_file(server.port, source_file, byte_count=128)
         _wait_for(lambda: len(list(receive_dir.rglob("*.localnetftp.part"))) == 1)
 
         events = []
-        send_paths("127.0.0.1", server._port, [source_file], on_progress=events.append)
+        send_paths("127.0.0.1", server.port, [source_file], on_progress=events.append)
         _wait_for(lambda: (receive_dir / "large.bin").exists())
     finally:
         server.stop()
@@ -194,10 +194,10 @@ def test_receiver_does_not_finalize_file_with_bad_checksum(tmp_path):
     source_file = tmp_path / "bad.bin"
     source_file.write_bytes(b"correct content")
 
-    server = TransferServer(receive_dir=receive_dir, port=_free_port())
+    server = TransferServer(receive_dir=receive_dir, port=0)
     server.start()
     try:
-        with socket.create_connection(("127.0.0.1", server._port), timeout=5) as client:
+        with socket.create_connection(("127.0.0.1", server.port), timeout=5) as client:
             _send_manifest(client, source_file)
             send_json(
                 client,
@@ -215,12 +215,6 @@ def test_receiver_does_not_finalize_file_with_bad_checksum(tmp_path):
         server.stop()
 
     assert not (receive_dir / "bad.bin").exists()
-
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
 
 
 def _send_partial_file(port: int, source_file, byte_count: int) -> None:
