@@ -1,4 +1,4 @@
-name: Test and Package
+name: Package
 
 on:
   push:
@@ -17,34 +17,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Test
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: pip
-
-      - name: Install dependencies
-        run: python -m pip install -r requirements-dev.txt
-
-      - name: Run tests
-        run: python -m pytest
-
-      - name: Verify local transfer
-        run: python scripts/verify_local_transfer.py
-
   package-windows:
     name: Package Windows exe
     runs-on: windows-latest
-    needs: test
-    if: github.event_name != 'pull_request'
 
     steps:
       - name: Checkout

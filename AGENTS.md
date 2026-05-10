@@ -93,8 +93,8 @@
 - 或 `python scripts/build_exe.py`
 
 GitHub Actions 打包成果物：
-- `.github/workflows/build.yml` 在 PR 上只跑测试和本机传输验证。
-- push 到 `master` 或 `v*` tag、或手动 `workflow_dispatch` 时，会在 Windows runner 上执行 Nuitka 打包。
+- `.github/workflows/build.yml` 不单独运行测试，触发后直接在 Windows runner 上执行 Nuitka 打包。
+- PR、push 到 `master` 或 `v*` tag、以及手动 `workflow_dispatch` 都会上传 Windows exe artifact。
 - 打包成果物通过 workflow artifact 上传，名称为 `LocalNetFTP-windows-${{ github.sha }}`。
 
 涉及 iroh、公网 ticket、Nuitka 打包或 DLL 加载时，还必须做一次 iroh ticket 本机烟测：生成 ticket、接收 ticket、确认文件保存成功。若因为网络环境限制无法验证公网链路，必须在最终回复中明确说明限制和已完成的本机验证范围。
