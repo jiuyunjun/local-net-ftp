@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import sys
 import threading
+import traceback
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import os
 import subprocess
@@ -176,6 +178,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.options = runtime_options
             self.config_path = runtime_options.config_path
             self.config_dir = runtime_options.config_dir or default_config_dir()
+            self.debug_log_path = self.config_dir / "debug.log"
             self.config = self._load_initial_config()
             self.discovery_service: DiscoveryService | None = None
             self.transfer_server: TransferServer | None = None
@@ -198,6 +201,10 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.mobile_share_port = _dev_related_port(MOBILE_SHARE_PORT, runtime_options.dev_instance, 1)
             self.mobile_receive_port = _dev_related_port(MOBILE_RECEIVE_PORT, runtime_options.dev_instance, 2)
             save_config(self.config, self.config_path)
+            self.log_debug("runtime initialized")
+
+        def log_debug(self, message: str) -> None:
+            _append_debug_log(self.debug_log_path, message)
 
         def _load_initial_config(self) -> AppConfig:
             if self.options.dev_instance and self.config_path is not None and not self.config_path.exists():
@@ -1646,9 +1653,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.activateWindow()
 
     def show_mobile_receive_window() -> None:
+        runtime.log_debug("show_mobile_receive_window entered")
         try:
             for window in list(mobile_receive_windows):
                 if not window.is_closed:
+                    runtime.log_debug("mobile receive window already exists; bringing to front")
                     bring_window_to_front(window)
                     return
             window = MobileReceiveWindow(runtime)
@@ -1659,23 +1668,32 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             window.setWindowIcon(icon)
             bring_window_to_front(window)
             QApplication.processEvents()
+            runtime.log_debug("mobile receive loading window shown")
         except Exception as exc:
+            runtime.log_debug(f"mobile receive window open failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
             QMessageBox.warning(None, "LocalNetFTP", f"从手机接收窗口打开失败：{type(exc).__name__}: {exc}")
             return
 
+        runtime.log_debug("mobile receive initialization scheduled")
         QTimer.singleShot(120, lambda: start_mobile_receive_initialization(window))
 
     def start_mobile_receive_initialization(window: MobileReceiveWindow) -> None:
         if window.is_closed or window not in mobile_receive_windows:
+            runtime.log_debug("mobile receive initialization skipped because window is closed")
             return
+        runtime.log_debug("mobile receive initialization thread starting")
 
         def worker() -> None:
             try:
+                runtime.log_debug("mobile receive worker starting server")
                 server = runtime.start_mobile_receive_server()
+                runtime.log_debug("mobile receive worker collecting urls")
                 urls = server.urls()
             except Exception as exc:
+                runtime.log_debug(f"mobile receive worker failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
                 ui_events.mobile_receive_error.emit(window, f"从手机接收启动失败：{type(exc).__name__}: {exc}")
                 return
+            runtime.log_debug(f"mobile receive worker ready with {len(urls)} urls")
             ui_events.mobile_receive_ready.emit(window, server, urls)
 
         threading.Thread(
@@ -1696,12 +1714,15 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         server: MobileReceiveServer,
         urls: list[ShareAddress],
     ) -> None:
+        runtime.log_debug("mobile receive ready signal received")
         if window.is_closed or window not in mobile_receive_windows:
+            runtime.log_debug("mobile receive ready ignored because window is closed")
             runtime.stop_mobile_receive_server_async()
             return
         window.set_ready(server, urls)
 
     def handle_mobile_receive_error(window: MobileReceiveWindow, message: str) -> None:
+        runtime.log_debug(f"mobile receive error signal received: {message}")
         runtime.stop_mobile_receive_server_async()
         if window.is_closed or window not in mobile_receive_windows:
             return
@@ -1824,7 +1845,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         show_ticket_input_window()
 
     def open_mobile_receive_from_tray(checked: bool = False) -> None:
-        QTimer.singleShot(0, show_mobile_receive_window)
+        runtime.log_debug(f"mobile receive tray action triggered checked={checked}")
+        try:
+            QTimer.singleShot(0, show_mobile_receive_window)
+            runtime.log_debug("mobile receive tray action scheduled")
+        except Exception as exc:
+            runtime.log_debug(f"mobile receive tray action failed: {type(exc).__name__}: {exc}\n{traceback.format_exc()}")
+            QMessageBox.warning(None, "LocalNetFTP", f"从手机接收启动失败：{type(exc).__name__}: {exc}")
 
     share_action.triggered.connect(show_share_window)
     mobile_receive_action.triggered.connect(open_mobile_receive_from_tray)
@@ -2005,6 +2032,15 @@ def _clamp(value: int, minimum: int, maximum: int) -> int:
     if maximum < minimum:
         return minimum
     return max(minimum, min(maximum, value))
+
+
+def _append_debug_log(path: Path, message: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        path.open("a", encoding="utf-8").write(f"[{timestamp}] {message}\n")
+    except OSError:
+        pass
 
 
 def _internet_progress_percent(progress: InternetTransferProgress) -> int:
