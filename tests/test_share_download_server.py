@@ -64,6 +64,8 @@ def test_mobile_file_share_server_serves_original_files(tmp_path):
     assert "hello" in html
     assert "复制文字" in html
     assert "function copyText" in html
+    assert "document.execCommand('copy')" in html
+    assert "window.isSecureContext" in html
     assert "function isSafari()" in html
     assert data == b"updated"
 

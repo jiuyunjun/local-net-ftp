@@ -363,11 +363,30 @@ class MobileFileShareServer:
     async function copyText(id) {{
       const text = document.getElementById(id)?.textContent || '';
       if (!text) return;
-      await navigator.clipboard.writeText(text);
+      let copied = false;
+      if (navigator.clipboard && window.isSecureContext) {{
+        try {{
+          await navigator.clipboard.writeText(text);
+          copied = true;
+        }} catch (error) {{
+          copied = false;
+        }}
+      }}
+      if (!copied) {{
+        const area = document.createElement('textarea');
+        area.value = text;
+        area.setAttribute('readonly', '');
+        area.style.position = 'fixed';
+        area.style.left = '-9999px';
+        document.body.appendChild(area);
+        area.select();
+        copied = document.execCommand('copy');
+        area.remove();
+      }}
       const button = document.querySelector('[data-copy-target="' + id + '"]');
       if (!button) return;
       const original = button.textContent;
-      button.textContent = '已复制';
+      button.textContent = copied ? '已复制' : '复制失败';
       window.setTimeout(() => button.textContent = original, 1400);
     }}
   </script>

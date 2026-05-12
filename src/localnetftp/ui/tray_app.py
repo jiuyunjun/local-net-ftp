@@ -1645,17 +1645,21 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.activateWindow()
 
     def show_mobile_receive_window() -> None:
-        for window in list(mobile_receive_windows):
-            if not window.is_closed:
-                bring_window_to_front(window)
-                return
-        window = MobileReceiveWindow(runtime)
-        mobile_receive_windows.append(window)
-        window.destroyed.connect(
-            lambda *_: mobile_receive_windows.remove(window) if window in mobile_receive_windows else None
-        )
-        window.setWindowIcon(icon)
-        bring_window_to_front(window)
+        try:
+            for window in list(mobile_receive_windows):
+                if not window.is_closed:
+                    bring_window_to_front(window)
+                    return
+            window = MobileReceiveWindow(runtime)
+            mobile_receive_windows.append(window)
+            window.destroyed.connect(
+                lambda *_: mobile_receive_windows.remove(window) if window in mobile_receive_windows else None
+            )
+            window.setWindowIcon(icon)
+            bring_window_to_front(window)
+        except Exception as exc:
+            QMessageBox.warning(None, "LocalNetFTP", f"从手机接收窗口打开失败：{type(exc).__name__}: {exc}")
+            return
 
         def worker() -> None:
             try:
@@ -1812,7 +1816,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         show_ticket_input_window()
 
     share_action.triggered.connect(show_share_window)
-    mobile_receive_action.triggered.connect(show_mobile_receive_window)
+    mobile_receive_action.triggered.connect(lambda: QTimer.singleShot(0, show_mobile_receive_window))
     receive_ticket_action.triggered.connect(receive_ticket)
     settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)
