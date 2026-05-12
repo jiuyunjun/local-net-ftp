@@ -1045,6 +1045,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._provider = provider
             self.setWindowTitle("公网 ticket")
             self.setMinimumSize(560, 300)
+            self.setWindowFlag(Qt.Window, True)
 
             title = QLabel("公网 ticket")
             title.setObjectName("titleLabel")
@@ -1621,9 +1622,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         ticket_windows.append(window)
         window.destroyed.connect(lambda: ticket_windows.remove(window) if window in ticket_windows else None)
         window.setWindowIcon(icon)
-        window.show()
-        window.raise_()
-        window.activateWindow()
+        bring_window_to_front(window)
 
     def show_mobile_share_window(paths: list[Path]) -> None:
         for window in list(mobile_share_windows):

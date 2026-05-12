@@ -207,11 +207,7 @@ class MobileFileShareServer:
         @app.get("/")
         def index():
             items = "\n".join(
-                f"""<label class="file">
-  <input type="checkbox" value="{escape(file_id)}">
-  <span>{escape(path.name)}</span>
-  <small>{escape(_format_file_size(path.stat().st_size))}</small>
-</label>"""
+                _mobile_share_item_html(file_id, path)
                 for file_id, path in self._files.items()
             )
             return f"""<!doctype html>
@@ -289,6 +285,28 @@ class MobileFileShareServer:
       flex: 0 0 auto;
       color: #64748b;
     }}
+    .preview {{
+      margin: -4px 0 12px 34px;
+      padding: 12px;
+      border: 1px solid #d8e0ea;
+      border-radius: 8px;
+      background: white;
+    }}
+    .preview img {{
+      display: block;
+      max-width: 100%;
+      max-height: 70vh;
+      object-fit: contain;
+      border-radius: 6px;
+    }}
+    .text-preview {{
+      max-height: 45vh;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      margin: 0 0 10px;
+      color: #172033;
+    }}
   </style>
 </head>
 <body>
@@ -342,6 +360,16 @@ class MobileFileShareServer:
       if (ids.length === 0) return;
       window.location.href = '/download.zip?ids=' + encodeURIComponent(ids.join(','));
     }}
+    async function copyText(id) {{
+      const text = document.getElementById(id)?.textContent || '';
+      if (!text) return;
+      await navigator.clipboard.writeText(text);
+      const button = document.querySelector('[data-copy-target="' + id + '"]');
+      if (!button) return;
+      const original = button.textContent;
+      button.textContent = '已复制';
+      window.setTimeout(() => button.textContent = original, 1400);
+    }}
   </script>
 </body>
 </html>"""
@@ -352,6 +380,13 @@ class MobileFileShareServer:
             if path is None or not path.exists():
                 abort(404)
             return send_file(path, as_attachment=True, download_name=path.name)
+
+        @app.get("/preview/<file_id>")
+        def preview(file_id: str):
+            path = self._files.get(file_id)
+            if path is None or not path.exists() or not _is_mobile_inline_image(path):
+                abort(404)
+            return send_file(path)
 
         @app.get("/download.zip")
         def download_zip():
@@ -589,6 +624,60 @@ def _share_files(paths: list[Path]) -> dict[str, Path]:
             continue
         raise ValueError(f"Unsupported share path: {path}")
     return files
+
+
+def _mobile_share_item_html(file_id: str, path: Path) -> str:
+    label = f"""<label class="file">
+  <input type="checkbox" value="{escape(file_id)}">
+  <span>{escape(path.name)}</span>
+  <small>{escape(_format_file_size(path.stat().st_size))}</small>
+</label>"""
+    if _is_mobile_inline_image(path):
+        return f"""{label}
+<div class="preview">
+  <img src="/preview/{escape(file_id)}" alt="{escape(path.name)}">
+</div>"""
+    if _is_mobile_inline_text(path):
+        text = _read_mobile_text_preview(path)
+        if text is not None:
+            preview_id = f"text-preview-{file_id}"
+            return f"""{label}
+<div class="preview">
+  <pre class="text-preview" id="{escape(preview_id)}">{escape(text)}</pre>
+  <button type="button" data-copy-target="{escape(preview_id)}" onclick="copyText('{escape(preview_id)}')">复制文字</button>
+</div>"""
+    return label
+
+
+def _is_mobile_inline_image(path: Path) -> bool:
+    return path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+
+
+def _is_mobile_inline_text(path: Path) -> bool:
+    return path.suffix.lower() in {".txt", ".md", ".log", ".csv", ".json", ".py", ".ini", ".yaml", ".yml"}
+
+
+def _read_mobile_text_preview(path: Path, max_bytes: int = 256 * 1024) -> str | None:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if len(data) > max_bytes:
+        data = data[:max_bytes]
+        truncated = True
+    else:
+        truncated = False
+    for encoding in ("utf-8", "gbk", "cp932"):
+        try:
+            text = data.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return None
+    if truncated:
+        return f"{text}\n..."
+    return text
 
 
 def _available_mobile_upload_path(receive_dir: Path, filename: str) -> Path:

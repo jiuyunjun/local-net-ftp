@@ -61,8 +61,27 @@ def test_mobile_file_share_server_serves_original_files(tmp_path):
     assert "b.txt" in html
     assert "下载选中" in html
     assert "打包 ZIP" in html
+    assert "hello" in html
+    assert "复制文字" in html
+    assert "function copyText" in html
     assert "function isSafari()" in html
     assert data == b"updated"
+
+
+def test_mobile_file_share_server_previews_images(tmp_path):
+    image = tmp_path / "photo.png"
+    image.write_bytes(b"png-bytes")
+    port = _free_port()
+    server = MobileFileShareServer([image], port=port, host="127.0.0.1")
+    server.start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode("utf-8")
+        preview = urllib.request.urlopen(f"http://127.0.0.1:{port}/preview/1", timeout=5).read()
+    finally:
+        server.stop()
+
+    assert '<img src="/preview/1"' in html
+    assert preview == b"png-bytes"
 
 
 def test_mobile_file_share_server_serves_selected_zip(tmp_path):
