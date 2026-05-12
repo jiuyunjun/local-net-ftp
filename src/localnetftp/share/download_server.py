@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import locale
 import socket
 import subprocess
 import tempfile
@@ -625,16 +626,14 @@ def _is_lan_address(address: str) -> bool:
 
 def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
     try:
-        output = subprocess.check_output(
+        output_bytes = subprocess.check_output(
             ["ipconfig"],
-            text=True,
-            encoding="gbk",
-            errors="ignore",
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.CalledProcessError):
         return []
 
+    output = _decode_windows_command_output(output_bytes)
     interfaces: list[tuple[str, str]] = []
     current_name = ""
     for raw_line in output.splitlines():
@@ -652,6 +651,27 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
             interfaces.append((current_name or "局域网", address))
 
     return interfaces
+
+
+def _decode_windows_command_output(output: bytes) -> str:
+    encodings = [
+        locale.getpreferredencoding(False),
+        "mbcs",
+        "utf-8",
+        "gbk",
+        "cp932",
+    ]
+    seen: set[str] = set()
+    for encoding in encodings:
+        normalized = encoding.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        try:
+            return output.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return output.decode("utf-8", errors="replace")
 
 
 def _normalize_interface_name(name: str) -> str:

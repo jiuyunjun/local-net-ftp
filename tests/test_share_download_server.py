@@ -1,4 +1,4 @@
-from localnetftp.share.download_server import _normalize_interface_name, lan_download_urls
+from localnetftp.share.download_server import _decode_windows_command_output, _normalize_interface_name, lan_download_urls
 from localnetftp.share import DownloadShareServer, MobileFileShareServer, MobileReceiveServer
 import io
 import socket
@@ -129,6 +129,12 @@ def test_mobile_receive_server_avoids_uploaded_file_name_conflicts(tmp_path):
 def test_normalize_interface_name_repairs_ethernet_question_marks():
     assert _normalize_interface_name("Ethernet adapter ??? 7") == "以太网 7"
     assert _normalize_interface_name("Ethernet adapter Ethernet 2") == "以太网 Ethernet 2"
+
+
+def test_decode_windows_command_output_uses_locale_encoding(monkeypatch):
+    monkeypatch.setattr("localnetftp.share.download_server.locale.getpreferredencoding", lambda _: "cp932")
+
+    assert _decode_windows_command_output("イーサネット".encode("cp932")) == "イーサネット"
 
 
 def _free_port() -> int:
