@@ -81,7 +81,7 @@ def _dev_related_port(base_port: int, instance_name: str, offset: int = 0) -> in
 
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
-    from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
+    from PySide6.QtGui import QAction, QCursor, QImage, QKeySequence, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -1703,11 +1703,38 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         ).start()
 
     def bring_window_to_front(window: QWidget) -> None:
-        window.show()
-        window.setWindowState((window.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        _move_widget_to_cursor_screen_center(window)
+        window.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        window.showNormal()
         window.raise_()
         window.activateWindow()
-        QTimer.singleShot(0, lambda: (window.show(), window.raise_(), window.activateWindow()))
+        runtime.log_debug(
+            f"bring window front visible={window.isVisible()} geometry={window.geometry().getRect()}"
+        )
+
+        def restore_normal_window() -> None:
+            if not window.isVisible():
+                return
+            window.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+
+        QTimer.singleShot(0, lambda: (window.showNormal(), window.raise_(), window.activateWindow()))
+        QTimer.singleShot(1500, restore_normal_window)
+
+    def _move_widget_to_cursor_screen_center(window: QWidget) -> None:
+        window.adjustSize()
+        screen = app.screenAt(QCursor.pos()) or app.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        width = min(window.width(), available.width())
+        height = min(window.height(), available.height())
+        x = available.left() + max(0, (available.width() - width) // 2)
+        y = available.top() + max(0, (available.height() - height) // 2)
+        window.resize(width, height)
+        window.move(x, y)
 
     def handle_mobile_receive_ready(
         window: MobileReceiveWindow,
