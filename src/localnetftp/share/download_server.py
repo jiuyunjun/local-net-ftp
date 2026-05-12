@@ -19,6 +19,8 @@ from localnetftp.transfer import available_destination_path
 
 
 DEFAULT_SHARE_PORT = 49300
+IPCONFIG_TIMEOUT_SECONDS = 1.5
+_LOCAL_IPV4_INTERFACES_CACHE: list[tuple[str, str]] | None = None
 
 
 @dataclass(frozen=True)
@@ -45,8 +47,13 @@ def local_ipv4_addresses() -> list[str]:
 
 
 def local_ipv4_interfaces() -> list[tuple[str, str]]:
+    global _LOCAL_IPV4_INTERFACES_CACHE
+    if _LOCAL_IPV4_INTERFACES_CACHE is not None:
+        return list(_LOCAL_IPV4_INTERFACES_CACHE)
+
     ipconfig_interfaces = _windows_ipconfig_interfaces()
     if ipconfig_interfaces:
+        _LOCAL_IPV4_INTERFACES_CACHE = ipconfig_interfaces
         return ipconfig_interfaces
 
     addresses: set[str] = set()
@@ -70,7 +77,10 @@ def local_ipv4_interfaces() -> list[tuple[str, str]]:
     except OSError:
         pass
 
-    return [("局域网", address) for address in sorted(addresses)]
+    interfaces = [("局域网", address) for address in sorted(addresses)]
+    if interfaces:
+        _LOCAL_IPV4_INTERFACES_CACHE = interfaces
+    return interfaces
 
 
 class DownloadShareServer:
@@ -629,8 +639,9 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
         output_bytes = subprocess.check_output(
             ["ipconfig"],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=IPCONFIG_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return []
 
     output = _decode_windows_command_output(output_bytes)

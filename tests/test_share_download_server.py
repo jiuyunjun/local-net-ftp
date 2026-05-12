@@ -1,7 +1,15 @@
-from localnetftp.share.download_server import _decode_windows_command_output, _normalize_interface_name, lan_download_urls
+from localnetftp.share import download_server
+from localnetftp.share.download_server import (
+    _decode_windows_command_output,
+    _normalize_interface_name,
+    _windows_ipconfig_interfaces,
+    lan_download_urls,
+    local_ipv4_interfaces,
+)
 from localnetftp.share import DownloadShareServer, MobileFileShareServer, MobileReceiveServer
 import io
 import socket
+import subprocess
 import urllib.request
 import zipfile
 
@@ -135,6 +143,31 @@ def test_decode_windows_command_output_uses_locale_encoding(monkeypatch):
     monkeypatch.setattr("localnetftp.share.download_server.locale.getpreferredencoding", lambda _: "cp932")
 
     assert _decode_windows_command_output("イーサネット".encode("cp932")) == "イーサネット"
+
+
+def test_windows_ipconfig_interfaces_returns_empty_on_timeout(monkeypatch):
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout"))
+
+    monkeypatch.setattr("localnetftp.share.download_server.subprocess.check_output", timeout)
+
+    assert _windows_ipconfig_interfaces() == []
+
+
+def test_local_ipv4_interfaces_caches_ipconfig_result(monkeypatch):
+    monkeypatch.setattr(download_server, "_LOCAL_IPV4_INTERFACES_CACHE", None)
+    calls = 0
+
+    def fake_ipconfig():
+        nonlocal calls
+        calls += 1
+        return [("イーサネット", "192.168.1.10")]
+
+    monkeypatch.setattr(download_server, "_windows_ipconfig_interfaces", fake_ipconfig)
+
+    assert local_ipv4_interfaces() == [("イーサネット", "192.168.1.10")]
+    assert local_ipv4_interfaces() == [("イーサネット", "192.168.1.10")]
+    assert calls == 1
 
 
 def _free_port() -> int:

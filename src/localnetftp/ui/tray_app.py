@@ -23,7 +23,13 @@ from localnetftp.internet_transfer import (
     InternetTransferProgress,
 )
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
-from localnetftp.share import DownloadShareServer, MobileFileShareServer, MobileReceiveServer, ShareAddress
+from localnetftp.share import (
+    DownloadShareServer,
+    MobileFileShareServer,
+    MobileReceiveServer,
+    ShareAddress,
+    local_ipv4_interfaces,
+)
 from localnetftp.transfer import ReceiveProgress, ReceiveResult, TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
@@ -198,6 +204,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 return transfer_error
             if discovery_error:
                 return discovery_error
+            threading.Thread(
+                target=local_ipv4_interfaces,
+                name="LocalNetFTPNetworkInterfacesWarmup",
+                daemon=True,
+            ).start()
             return ""
 
         def stop(self) -> None:
