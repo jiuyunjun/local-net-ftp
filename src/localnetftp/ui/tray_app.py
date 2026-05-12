@@ -981,6 +981,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._set_urls([])
 
         def _set_loading(self) -> None:
+            self.status.setText("正在初始化...")
             self._clear_addresses()
             loading = QLabel("正在启动手机接收服务...")
             loading.setObjectName("statusLabel")
@@ -1657,8 +1658,15 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             )
             window.setWindowIcon(icon)
             bring_window_to_front(window)
+            QApplication.processEvents()
         except Exception as exc:
             QMessageBox.warning(None, "LocalNetFTP", f"从手机接收窗口打开失败：{type(exc).__name__}: {exc}")
+            return
+
+        QTimer.singleShot(120, lambda: start_mobile_receive_initialization(window))
+
+    def start_mobile_receive_initialization(window: MobileReceiveWindow) -> None:
+        if window.is_closed or window not in mobile_receive_windows:
             return
 
         def worker() -> None:
