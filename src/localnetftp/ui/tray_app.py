@@ -140,6 +140,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         internet_ticket = Signal(object, object)
         internet_progress = Signal(object)
         show_floating = Signal()
+        mobile_receive_ready = Signal(object, object, object)
+        mobile_receive_error = Signal(object, str)
 
     def _qr_pixmap(text: str, scale: int) -> QPixmap:
         import qrcode
@@ -326,6 +328,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if self.mobile_receive_server is not None:
                 self.mobile_receive_server.stop()
                 self.mobile_receive_server = None
+
+        def stop_mobile_receive_server_async(self) -> None:
+            server = self.mobile_receive_server
+            self.mobile_receive_server = None
+            if server is None:
+                return
+            threading.Thread(
+                target=server.stop,
+                name="LocalNetFTPMobileReceiveStop",
+                daemon=True,
+            ).start()
 
         def start_internet_provider(self, paths: list[Path]) -> None:
             provider = IrohTicketProvider(
@@ -900,12 +913,14 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             super().closeEvent(event)
 
     class MobileReceiveWindow(QWidget):
-        def __init__(self, runtime: AppRuntime, server: MobileReceiveServer) -> None:
+        def __init__(self, runtime: AppRuntime) -> None:
             super().__init__()
             self._runtime = runtime
-            self._server = server
+            self._server: MobileReceiveServer | None = None
+            self._closed = False
             self.setWindowTitle("从手机接收")
             self.setMinimumSize(520, 420)
+            self.setAttribute(Qt.WA_DeleteOnClose, True)
 
             title = QLabel("从手机接收")
             title.setObjectName("titleLabel")
@@ -937,20 +952,43 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.addWidget(self.status)
             layout.addWidget(close_button, alignment=Qt.AlignRight)
             self.setStyleSheet(_app_stylesheet())
-            self._set_urls(server.urls())
+            self._set_loading()
+
+        @property
+        def is_closed(self) -> bool:
+            return self._closed
+
+        def set_ready(self, server: MobileReceiveServer, urls: list[ShareAddress]) -> None:
+            self._server = server
+            self.status.setText("扫描二维码，或点击网址复制")
+            self._set_urls(urls)
+
+        def set_error(self, message: str) -> None:
+            self.status.setText(message)
+            self._set_urls([])
+
+        def _set_loading(self) -> None:
+            self._clear_addresses()
+            loading = QLabel("正在启动手机接收服务...")
+            loading.setObjectName("statusLabel")
+            self.address_layout.addWidget(loading)
+            self.address_layout.addStretch(1)
 
         def _set_urls(self, urls: list[ShareAddress]) -> None:
-            while self.address_layout.count():
-                item = self.address_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
+            self._clear_addresses()
             if not urls:
                 self.address_layout.addWidget(QLabel("未找到可用局域网地址"))
                 return
             for address in urls:
                 self.address_layout.addWidget(self._address_widget(address))
             self.address_layout.addStretch(1)
+
+        def _clear_addresses(self) -> None:
+            while self.address_layout.count():
+                item = self.address_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
 
         def _address_widget(self, address: ShareAddress) -> QWidget:
             card = QWidget()
@@ -983,7 +1021,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.status.setText("已复制网址")
 
         def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
-            self._runtime.stop_mobile_receive_server()
+            self._closed = True
+            self._runtime.stop_mobile_receive_server_async()
             super().closeEvent(event)
 
     class TicketWindow(QWidget):
@@ -1595,13 +1634,12 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     def show_mobile_receive_window() -> None:
         for window in list(mobile_receive_windows):
-            window.close()
-        try:
-            server = runtime.start_mobile_receive_server()
-        except Exception as exc:
-            QMessageBox.warning(None, "LocalNetFTP", f"从手机接收启动失败：{type(exc).__name__}: {exc}")
-            return
-        window = MobileReceiveWindow(runtime, server)
+            if not window.is_closed:
+                window.show()
+                window.raise_()
+                window.activateWindow()
+                return
+        window = MobileReceiveWindow(runtime)
         mobile_receive_windows.append(window)
         window.destroyed.connect(
             lambda *_: mobile_receive_windows.remove(window) if window in mobile_receive_windows else None
@@ -1610,6 +1648,37 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.show()
         window.raise_()
         window.activateWindow()
+
+        def worker() -> None:
+            try:
+                server = runtime.start_mobile_receive_server()
+                urls = server.urls()
+            except Exception as exc:
+                ui_events.mobile_receive_error.emit(window, f"从手机接收启动失败：{type(exc).__name__}: {exc}")
+                return
+            ui_events.mobile_receive_ready.emit(window, server, urls)
+
+        threading.Thread(
+            target=worker,
+            name="LocalNetFTPMobileReceiveStart",
+            daemon=True,
+        ).start()
+
+    def handle_mobile_receive_ready(
+        window: MobileReceiveWindow,
+        server: MobileReceiveServer,
+        urls: list[ShareAddress],
+    ) -> None:
+        if window.is_closed or window not in mobile_receive_windows:
+            runtime.stop_mobile_receive_server_async()
+            return
+        window.set_ready(server, urls)
+
+    def handle_mobile_receive_error(window: MobileReceiveWindow, message: str) -> None:
+        runtime.stop_mobile_receive_server_async()
+        if window.is_closed or window not in mobile_receive_windows:
+            return
+        window.set_error(message)
 
     def show_receive_progress_window() -> ReceiveProgressWindow:
         window = ReceiveProgressWindow()
@@ -1661,6 +1730,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     ui_events.error.connect(show_error_message)
     ui_events.internet_ticket.connect(show_ticket_window)
     ui_events.internet_progress.connect(handle_internet_progress)
+    ui_events.mobile_receive_ready.connect(handle_mobile_receive_ready)
+    ui_events.mobile_receive_error.connect(handle_mobile_receive_error)
 
     runtime = AppRuntime()
     startup_status = runtime.start()
