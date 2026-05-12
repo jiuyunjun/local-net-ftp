@@ -1803,13 +1803,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     ui_events.show_floating.connect(show_floating_window)
 
-    def show_settings_window() -> None:
+    def show_settings_window(checked: bool = False) -> None:
         settings_window.reload()
         settings_window.show()
         settings_window.raise_()
         settings_window.activateWindow()
 
-    def show_share_window() -> None:
+    def show_share_window(checked: bool = False) -> None:
         try:
             server = runtime.start_share_server()
             share_window.set_urls(server.urls())
@@ -1820,11 +1820,14 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         share_window.raise_()
         share_window.activateWindow()
 
-    def receive_ticket() -> None:
+    def receive_ticket(checked: bool = False) -> None:
         show_ticket_input_window()
 
+    def open_mobile_receive_from_tray(checked: bool = False) -> None:
+        QTimer.singleShot(0, show_mobile_receive_window)
+
     share_action.triggered.connect(show_share_window)
-    mobile_receive_action.triggered.connect(lambda: QTimer.singleShot(0, show_mobile_receive_window))
+    mobile_receive_action.triggered.connect(open_mobile_receive_from_tray)
     receive_ticket_action.triggered.connect(receive_ticket)
     settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)
