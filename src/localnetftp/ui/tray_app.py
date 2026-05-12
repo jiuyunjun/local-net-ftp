@@ -68,6 +68,15 @@ def _dev_transfer_port(instance_name: str) -> int:
     return DEV_TRANSFER_BASE_PORT + sum(ord(char) for char in normalized) % 1000
 
 
+def _dev_related_port(base_port: int, instance_name: str, offset: int = 0) -> int:
+    normalized = instance_name.strip().upper()
+    if not normalized:
+        return base_port
+    if len(normalized) == 1 and "A" <= normalized <= "Z":
+        return DEV_TRANSFER_BASE_PORT + 100 + (ord(normalized) - ord("A")) * 10 + offset
+    return DEV_TRANSFER_BASE_PORT + 100 + (sum(ord(char) for char in normalized) % 100) * 10 + offset
+
+
 def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtCore import QEvent, QObject, QPoint, QTimer, Qt, Signal
     from PySide6.QtGui import QAction, QImage, QKeySequence, QPixmap
@@ -185,6 +194,9 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 listen_port=runtime_options.transfer_port,
                 device_id=self.config.device_id,
             )
+            self.share_port = _dev_related_port(SHARE_PORT, runtime_options.dev_instance, 0)
+            self.mobile_share_port = _dev_related_port(MOBILE_SHARE_PORT, runtime_options.dev_instance, 1)
+            self.mobile_receive_port = _dev_related_port(MOBILE_RECEIVE_PORT, runtime_options.dev_instance, 2)
             save_config(self.config, self.config_path)
 
         def _load_initial_config(self) -> AppConfig:
@@ -294,7 +306,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def start_share_server(self) -> DownloadShareServer:
             if self.share_server is None:
-                self.share_server = DownloadShareServer(_share_executable_path(), port=SHARE_PORT)
+                self.share_server = DownloadShareServer(_share_executable_path(), port=self.share_port)
                 self.share_server.start()
             return self.share_server
 
@@ -305,7 +317,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def start_mobile_share_server(self, paths: list[Path]) -> MobileFileShareServer:
             self.stop_mobile_share_server()
-            self.mobile_share_server = MobileFileShareServer(paths, port=MOBILE_SHARE_PORT)
+            self.mobile_share_server = MobileFileShareServer(paths, port=self.mobile_share_port)
             self.mobile_share_server.start()
             return self.mobile_share_server
 
@@ -318,7 +330,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if self.mobile_receive_server is None:
                 self.mobile_receive_server = MobileReceiveServer(
                     self.config.receive_dir,
-                    port=MOBILE_RECEIVE_PORT,
+                    port=self.mobile_receive_port,
                     on_received=lambda paths: ui_events.received.emit(ReceiveResult(paths)),
                 )
                 self.mobile_receive_server.start()
@@ -921,6 +933,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowTitle("从手机接收")
             self.setMinimumSize(520, 420)
             self.setAttribute(Qt.WA_DeleteOnClose, True)
+            self.setWindowFlag(Qt.Window, True)
 
             title = QLabel("从手机接收")
             title.setObjectName("titleLabel")
@@ -1635,9 +1648,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     def show_mobile_receive_window() -> None:
         for window in list(mobile_receive_windows):
             if not window.is_closed:
-                window.show()
-                window.raise_()
-                window.activateWindow()
+                bring_window_to_front(window)
                 return
         window = MobileReceiveWindow(runtime)
         mobile_receive_windows.append(window)
@@ -1645,9 +1656,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             lambda *_: mobile_receive_windows.remove(window) if window in mobile_receive_windows else None
         )
         window.setWindowIcon(icon)
-        window.show()
-        window.raise_()
-        window.activateWindow()
+        bring_window_to_front(window)
 
         def worker() -> None:
             try:
@@ -1663,6 +1672,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             name="LocalNetFTPMobileReceiveStart",
             daemon=True,
         ).start()
+
+    def bring_window_to_front(window: QWidget) -> None:
+        window.show()
+        window.setWindowState((window.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
+        window.raise_()
+        window.activateWindow()
+        QTimer.singleShot(0, lambda: (window.show(), window.raise_(), window.activateWindow()))
 
     def handle_mobile_receive_ready(
         window: MobileReceiveWindow,
