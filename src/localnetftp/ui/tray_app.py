@@ -23,7 +23,7 @@ from localnetftp.internet_transfer import (
     InternetTransferProgress,
 )
 from localnetftp.network import DiscoveryService, LocalPeerRegistry, Peer, create_device_identity
-from localnetftp.share import DownloadShareServer, MobileFileShareServer, ShareAddress
+from localnetftp.share import DownloadShareServer, MobileFileShareServer, MobileReceiveServer, ShareAddress
 from localnetftp.transfer import ReceiveProgress, ReceiveResult, TransferProgress, TransferServer, send_paths
 from localnetftp.ui.clipboard_payload import timestamped_clipboard_path
 from localnetftp.ui.drop_paths import local_paths_from_urls
@@ -88,6 +88,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     SHARE_PORT = 49300
     MOBILE_SHARE_PORT = 49301
+    MOBILE_RECEIVE_PORT = 49302
     MOBILE_SHARE_NAME = "局域网内手机用户"
     runtime_options = options or RuntimeOptions()
 
@@ -163,6 +164,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.transfer_server: TransferServer | None = None
             self.share_server: DownloadShareServer | None = None
             self.mobile_share_server: MobileFileShareServer | None = None
+            self.mobile_receive_server: MobileReceiveServer | None = None
             self.internet_providers: list[IrohTicketProvider] = []
             self.internet_receivers: list[IrohTicketReceiver] = []
             self.local_peer_registry = (
@@ -203,6 +205,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.stop_transfer_server()
             self.stop_share_server()
             self.stop_mobile_share_server()
+            self.stop_mobile_receive_server()
             self.stop_internet_providers()
 
         def save_settings(self, config: AppConfig) -> str:
@@ -297,6 +300,21 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             if self.mobile_share_server is not None:
                 self.mobile_share_server.stop()
                 self.mobile_share_server = None
+
+        def start_mobile_receive_server(self) -> MobileReceiveServer:
+            if self.mobile_receive_server is None:
+                self.mobile_receive_server = MobileReceiveServer(
+                    self.config.receive_dir,
+                    port=MOBILE_RECEIVE_PORT,
+                    on_received=lambda paths: ui_events.received.emit(ReceiveResult(paths)),
+                )
+                self.mobile_receive_server.start()
+            return self.mobile_receive_server
+
+        def stop_mobile_receive_server(self) -> None:
+            if self.mobile_receive_server is not None:
+                self.mobile_receive_server.stop()
+                self.mobile_receive_server = None
 
         def start_internet_provider(self, paths: list[Path]) -> None:
             provider = IrohTicketProvider(
@@ -870,6 +888,93 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._runtime.stop_mobile_share_server()
             super().closeEvent(event)
 
+    class MobileReceiveWindow(QWidget):
+        def __init__(self, runtime: AppRuntime, server: MobileReceiveServer) -> None:
+            super().__init__()
+            self._runtime = runtime
+            self._server = server
+            self.setWindowTitle("从手机接收")
+            self.setMinimumSize(520, 420)
+
+            title = QLabel("从手机接收")
+            title.setObjectName("titleLabel")
+            label = QLabel("窗口存在期间，手机可访问这些网址上传文件、图片或文字。")
+            label.setObjectName("mutedLabel")
+            self.status = QLabel("扫描二维码，或点击网址复制")
+            self.status.setObjectName("statusLabel")
+
+            self.address_layout = QVBoxLayout()
+            self.address_layout.setContentsMargins(0, 0, 0, 0)
+            self.address_layout.setSpacing(10)
+            address_container = QWidget()
+            address_container.setLayout(self.address_layout)
+
+            scroll_area = QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QFrame.NoFrame)
+            scroll_area.setWidget(address_container)
+
+            close_button = QPushButton("停止接收")
+            close_button.clicked.connect(self.close)
+
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            layout.addWidget(title)
+            layout.addWidget(label)
+            layout.addWidget(scroll_area, 1)
+            layout.addWidget(self.status)
+            layout.addWidget(close_button, alignment=Qt.AlignRight)
+            self.setStyleSheet(_app_stylesheet())
+            self._set_urls(server.urls())
+
+        def _set_urls(self, urls: list[ShareAddress]) -> None:
+            while self.address_layout.count():
+                item = self.address_layout.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
+            if not urls:
+                self.address_layout.addWidget(QLabel("未找到可用局域网地址"))
+                return
+            for address in urls:
+                self.address_layout.addWidget(self._address_widget(address))
+            self.address_layout.addStretch(1)
+
+        def _address_widget(self, address: ShareAddress) -> QWidget:
+            card = QWidget()
+            card.setObjectName("shareAddressCard")
+
+            interface_label = QLabel(address.interface_name)
+            interface_label.setObjectName("shareInterfaceLabel")
+            url_button = QPushButton(address.url)
+            url_button.setObjectName("linkButton")
+            url_button.clicked.connect(lambda: self._copy_url(address.url))
+            qr_label = QLabel()
+            qr_label.setAlignment(Qt.AlignCenter)
+            qr_label.setPixmap(_qr_pixmap(address.url, 4))
+
+            text_layout = QVBoxLayout()
+            text_layout.setContentsMargins(0, 0, 0, 0)
+            text_layout.setSpacing(6)
+            text_layout.addWidget(interface_label)
+            text_layout.addWidget(url_button)
+
+            row_layout = QHBoxLayout(card)
+            row_layout.setContentsMargins(10, 10, 10, 10)
+            row_layout.setSpacing(12)
+            row_layout.addWidget(qr_label)
+            row_layout.addLayout(text_layout, 1)
+            return card
+
+        def _copy_url(self, url: str) -> None:
+            QApplication.clipboard().setText(url)
+            self.status.setText("已复制网址")
+
+        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+            self._runtime.stop_mobile_receive_server()
+            super().closeEvent(event)
+
     class TicketWindow(QWidget):
         def __init__(self, runtime: AppRuntime, provider: IrohTicketProvider, ticket: InternetTicket) -> None:
             super().__init__()
@@ -1356,6 +1461,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     ticket_windows: list[TicketWindow] = []
     ticket_input_windows: list[TicketInputWindow] = []
     mobile_share_windows: list[MobileShareWindow] = []
+    mobile_receive_windows: list[MobileReceiveWindow] = []
     receive_progress_windows: list[ReceiveProgressWindow] = []
     send_windows: list[SendProgressWindow] = []
 
@@ -1476,6 +1582,24 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         window.raise_()
         window.activateWindow()
 
+    def show_mobile_receive_window() -> None:
+        for window in list(mobile_receive_windows):
+            window.close()
+        try:
+            server = runtime.start_mobile_receive_server()
+        except Exception as exc:
+            QMessageBox.warning(None, "LocalNetFTP", f"从手机接收启动失败：{type(exc).__name__}: {exc}")
+            return
+        window = MobileReceiveWindow(runtime, server)
+        mobile_receive_windows.append(window)
+        window.destroyed.connect(
+            lambda *_: mobile_receive_windows.remove(window) if window in mobile_receive_windows else None
+        )
+        window.setWindowIcon(icon)
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
     def show_receive_progress_window() -> ReceiveProgressWindow:
         window = ReceiveProgressWindow()
         receive_progress_windows.append(window)
@@ -1550,10 +1674,12 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     menu = QMenu()
     share_action = QAction("投送模式", menu)
+    mobile_receive_action = QAction("从手机接收", menu)
     receive_ticket_action = QAction("输入 ticket 接收文件", menu)
     settings_action = QAction("设置", menu)
     quit_action = QAction("退出", menu)
     menu.addAction(share_action)
+    menu.addAction(mobile_receive_action)
     menu.addAction(receive_ticket_action)
     menu.addAction(settings_action)
     menu.addSeparator()
@@ -1589,6 +1715,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         show_ticket_input_window()
 
     share_action.triggered.connect(show_share_window)
+    mobile_receive_action.triggered.connect(show_mobile_receive_window)
     receive_ticket_action.triggered.connect(receive_ticket)
     settings_action.triggered.connect(show_settings_window)
     quit_action.triggered.connect(app.quit)

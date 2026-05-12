@@ -6,11 +6,15 @@ import tempfile
 import threading
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from html import escape
 from pathlib import Path
+from typing import Callable
 
 from flask import Flask, abort, request, send_file
 from werkzeug.serving import make_server
+
+from localnetftp.transfer import available_destination_path
 
 
 DEFAULT_SHARE_PORT = 49300
@@ -389,6 +393,173 @@ class MobileFileShareServer:
         return zip_path
 
 
+MobileReceiveCallback = Callable[[list[Path]], None]
+
+
+class MobileReceiveServer:
+    def __init__(
+        self,
+        receive_dir: Path,
+        port: int = DEFAULT_SHARE_PORT + 2,
+        host: str = "0.0.0.0",
+        on_received: MobileReceiveCallback | None = None,
+    ) -> None:
+        self.receive_dir = receive_dir
+        self.port = port
+        self.host = host
+        self._on_received = on_received
+        self._server = None
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+
+        self.receive_dir.mkdir(parents=True, exist_ok=True)
+        app = Flask(__name__)
+
+        @app.get("/")
+        def index():
+            return """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LocalNetFTP 上传</title>
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      background: #f4f7fb;
+      color: #172033;
+    }
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 28px 18px;
+    }
+    h1 {
+      margin: 0 0 6px;
+      font-size: 24px;
+    }
+    p {
+      margin: 0 0 18px;
+      color: #5b687a;
+    }
+    form {
+      display: grid;
+      gap: 12px;
+    }
+    textarea,
+    input[type="file"] {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #d8e0ea;
+      border-radius: 8px;
+      background: white;
+      color: #172033;
+      font: inherit;
+    }
+    textarea {
+      min-height: 150px;
+      padding: 12px;
+      resize: vertical;
+    }
+    input[type="file"] {
+      padding: 12px;
+    }
+    button {
+      min-height: 42px;
+      padding: 0 16px;
+      border: 1px solid #2f7dd1;
+      border-radius: 8px;
+      background: #2f7dd1;
+      color: white;
+      font-weight: 600;
+    }
+    output {
+      min-height: 22px;
+      color: #536173;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>LocalNetFTP</h1>
+    <p>选择文件、图片，或输入文字发送到电脑。</p>
+    <form id="uploadForm">
+      <input name="files" type="file" multiple>
+      <textarea name="text" placeholder="输入文字"></textarea>
+      <button type="submit">发送到电脑</button>
+      <output id="status"></output>
+    </form>
+  </main>
+  <script>
+    const form = document.getElementById('uploadForm');
+    const status = document.getElementById('status');
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      status.textContent = '正在发送...';
+      const response = await fetch('/upload', {
+        method: 'POST',
+        body: new FormData(form)
+      });
+      if (response.ok) {
+        const payload = await response.json();
+        status.textContent = payload.message || '已发送';
+        form.reset();
+      } else {
+        status.textContent = '发送失败';
+      }
+    });
+  </script>
+</body>
+</html>"""
+
+        @app.post("/upload")
+        def upload():
+            saved_paths: list[Path] = []
+            for storage in request.files.getlist("files"):
+                if not storage.filename:
+                    continue
+                destination = _available_mobile_upload_path(self.receive_dir, storage.filename)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                storage.save(destination)
+                saved_paths.append(destination)
+
+            text = request.form.get("text", "")
+            if text.strip():
+                destination = _available_mobile_text_path(self.receive_dir)
+                destination.write_text(text, encoding="utf-8")
+                saved_paths.append(destination)
+
+            if not saved_paths:
+                return {"message": "请选择文件或输入文字"}, 400
+            if self._on_received is not None:
+                self._on_received(saved_paths)
+            return {"message": f"已发送 {len(saved_paths)} 个项目", "count": len(saved_paths)}
+
+        self._server = make_server(self.host, self.port, app, threaded=True)
+        self._thread = threading.Thread(
+            target=self._server.serve_forever,
+            name="LocalNetFTPMobileReceive",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=2.0)
+            self._thread = None
+
+    def urls(self) -> list[ShareAddress]:
+        return lan_download_urls(self.port, "LocalNetFTP", None)
+
+
 def _share_files(paths: list[Path]) -> dict[str, Path]:
     files: dict[str, Path] = {}
     counter = 1
@@ -407,6 +578,24 @@ def _share_files(paths: list[Path]) -> dict[str, Path]:
             continue
         raise ValueError(f"Unsupported share path: {path}")
     return files
+
+
+def _available_mobile_upload_path(receive_dir: Path, filename: str) -> Path:
+    name = _safe_upload_filename(filename)
+    return available_destination_path(receive_dir / name)
+
+
+def _available_mobile_text_path(receive_dir: Path, now: datetime | None = None) -> Path:
+    timestamp = (now or datetime.now()).strftime("%Y%m%d%H%M%S%f")[:-3]
+    return available_destination_path(receive_dir / f"手机文字_{timestamp}.txt", now)
+
+
+def _safe_upload_filename(filename: str) -> str:
+    normalized = filename.replace("\\", "/")
+    name = Path(normalized).name.strip().strip(".")
+    if not name:
+        return "手机上传文件"
+    return name
 
 
 def _format_file_size(size: int) -> str:

@@ -1,5 +1,5 @@
 from localnetftp.share.download_server import _normalize_interface_name, lan_download_urls
-from localnetftp.share import DownloadShareServer, MobileFileShareServer
+from localnetftp.share import DownloadShareServer, MobileFileShareServer, MobileReceiveServer
 import io
 import socket
 import urllib.request
@@ -78,6 +78,54 @@ def test_mobile_file_share_server_serves_selected_zip(tmp_path):
         assert archive.read("same_2.txt") == b"second"
 
 
+def test_mobile_receive_server_saves_uploaded_file_and_text(tmp_path):
+    received = []
+    port = _free_port()
+    server = MobileReceiveServer(tmp_path, port=port, host="127.0.0.1", on_received=received.append)
+    server.start()
+    try:
+        html = urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5).read().decode("utf-8")
+        response = _post_multipart(
+            f"http://127.0.0.1:{port}/upload",
+            fields={"text": "hello from phone"},
+            files={"files": ("photo.png", b"image-bytes", "image/png")},
+        )
+    finally:
+        server.stop()
+
+    assert "发送到电脑" in html
+    assert response["status"] == 200
+    assert (tmp_path / "photo.png").read_bytes() == b"image-bytes"
+    text_files = sorted(tmp_path.glob("手机文字_*.txt"))
+    assert len(text_files) == 1
+    assert text_files[0].read_text(encoding="utf-8") == "hello from phone"
+    assert received == [[tmp_path / "photo.png", text_files[0]]]
+
+
+def test_mobile_receive_server_avoids_uploaded_file_name_conflicts(tmp_path):
+    existing = tmp_path / "same.txt"
+    existing.write_text("old", encoding="utf-8")
+    received = []
+    port = _free_port()
+    server = MobileReceiveServer(tmp_path, port=port, host="127.0.0.1", on_received=received.append)
+    server.start()
+    try:
+        response = _post_multipart(
+            f"http://127.0.0.1:{port}/upload",
+            fields={},
+            files={"files": ("../same.txt", b"new", "text/plain")},
+        )
+    finally:
+        server.stop()
+
+    assert response["status"] == 200
+    assert existing.read_text(encoding="utf-8") == "old"
+    saved_paths = list(tmp_path.glob("same_*.txt"))
+    assert len(saved_paths) == 1
+    assert saved_paths[0].read_bytes() == b"new"
+    assert received == [[saved_paths[0]]]
+
+
 def test_normalize_interface_name_repairs_ethernet_question_marks():
     assert _normalize_interface_name("Ethernet adapter ??? 7") == "以太网 7"
     assert _normalize_interface_name("Ethernet adapter Ethernet 2") == "以太网 Ethernet 2"
@@ -87,3 +135,32 @@ def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return sock.getsockname()[1]
+
+
+def _post_multipart(url: str, fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]) -> dict[str, object]:
+    boundary = "LocalNetFTPTestBoundary"
+    body = io.BytesIO()
+    for name, value in fields.items():
+        body.write(f"--{boundary}\r\n".encode("ascii"))
+        body.write(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii"))
+        body.write(value.encode("utf-8"))
+        body.write(b"\r\n")
+    for name, (filename, content, content_type) in files.items():
+        body.write(f"--{boundary}\r\n".encode("ascii"))
+        body.write(
+            (
+                f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode("utf-8")
+        )
+        body.write(content)
+        body.write(b"\r\n")
+    body.write(f"--{boundary}--\r\n".encode("ascii"))
+    request = urllib.request.Request(
+        url,
+        data=body.getvalue(),
+        method="POST",
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        return {"status": response.status, "body": response.read()}
