@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import locale
+import ipaddress
 import re
 import shutil
 import socket
 import subprocess
 import tempfile
 import threading
+import time
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,6 +25,8 @@ from localnetftp.transfer import available_destination_path
 DEFAULT_SHARE_PORT = 49300
 IPCONFIG_TIMEOUT_SECONDS = 1.5
 _LOCAL_IPV4_INTERFACES_CACHE: list[tuple[str, str]] | None = None
+_LOCAL_IPV4_INTERFACES_CACHE_AT = 0.0
+INTERFACE_CACHE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -49,13 +53,15 @@ def local_ipv4_addresses() -> list[str]:
 
 
 def local_ipv4_interfaces() -> list[tuple[str, str]]:
-    global _LOCAL_IPV4_INTERFACES_CACHE
-    if _LOCAL_IPV4_INTERFACES_CACHE is not None:
+    global _LOCAL_IPV4_INTERFACES_CACHE, _LOCAL_IPV4_INTERFACES_CACHE_AT
+    now = time.monotonic()
+    if _LOCAL_IPV4_INTERFACES_CACHE is not None and now - _LOCAL_IPV4_INTERFACES_CACHE_AT < INTERFACE_CACHE_SECONDS:
         return list(_LOCAL_IPV4_INTERFACES_CACHE)
 
     ipconfig_interfaces = _windows_ipconfig_interfaces()
     if ipconfig_interfaces:
         _LOCAL_IPV4_INTERFACES_CACHE = ipconfig_interfaces
+        _LOCAL_IPV4_INTERFACES_CACHE_AT = now
         return ipconfig_interfaces
 
     addresses: set[str] = set()
@@ -80,8 +86,8 @@ def local_ipv4_interfaces() -> list[tuple[str, str]]:
         pass
 
     interfaces = [("局域网", address) for address in sorted(addresses)]
-    if interfaces:
-        _LOCAL_IPV4_INTERFACES_CACHE = interfaces
+    _LOCAL_IPV4_INTERFACES_CACHE = interfaces
+    _LOCAL_IPV4_INTERFACES_CACHE_AT = now
     return interfaces
 
 
@@ -719,8 +725,11 @@ def _is_mobile_inline_text(path: Path) -> bool:
 
 
 def _read_mobile_text_preview(path: Path, max_bytes: int = 256 * 1024) -> str | None:
+    import codecs
+
     try:
-        data = path.read_bytes()
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
     except OSError:
         return None
     if len(data) > max_bytes:
@@ -728,9 +737,9 @@ def _read_mobile_text_preview(path: Path, max_bytes: int = 256 * 1024) -> str | 
         truncated = True
     else:
         truncated = False
-    for encoding in ("utf-8", "gbk", "cp932"):
+    for encoding in ("utf-8-sig", "gbk", "cp932"):
         try:
-            text = data.decode(encoding)
+            text = codecs.getincrementaldecoder(encoding)().decode(data, final=not truncated)
             break
         except UnicodeDecodeError:
             continue
@@ -801,7 +810,11 @@ def _zip_arcname(path: Path, used_names: set[str]) -> str:
 
 
 def _is_lan_address(address: str) -> bool:
-    return not address.startswith("127.") and not address.startswith("169.254.")
+    try:
+        value = ipaddress.IPv4Address(address)
+    except ipaddress.AddressValueError:
+        return False
+    return not (value.is_loopback or value.is_link_local or value.is_unspecified or value.is_multicast)
 
 
 def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
@@ -827,7 +840,8 @@ def _windows_ipconfig_interfaces() -> list[tuple[str, str]]:
         if "IPv4" not in line:
             continue
         _, _, value = line.partition(":")
-        address = value.strip()
+        match = re.match(r"\s*(\d{1,3}(?:\.\d{1,3}){3})(?:\s|\(|$)", value)
+        address = match.group(1) if match else ""
         if address and _is_lan_address(address):
             interfaces.append((current_name or "局域网", address))
 

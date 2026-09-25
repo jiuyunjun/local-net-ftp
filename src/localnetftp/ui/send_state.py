@@ -31,5 +31,5 @@ def _summarize_names(names: list[str], limit: int) -> str:
     text = "、".join(visible_names)
     remaining_count = len(names) - limit
     if remaining_count > 0:
-        text = f"{text} 等 {remaining_count} 个"
+        text = f"{text} 等 {len(names)} 个"
     return text

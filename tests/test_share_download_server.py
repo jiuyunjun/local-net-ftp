@@ -241,6 +241,26 @@ def test_local_ipv4_interfaces_caches_ipconfig_result(monkeypatch):
     assert calls == 1
 
 
+def test_interfaces_refresh_after_network_changes(monkeypatch):
+    monkeypatch.setattr(download_server, "_LOCAL_IPV4_INTERFACES_CACHE", [("old", "192.168.1.2")])
+    monkeypatch.setattr(download_server, "_LOCAL_IPV4_INTERFACES_CACHE_AT", 10.0)
+    monkeypatch.setattr(download_server.time, "monotonic", lambda: 20.0)
+    monkeypatch.setattr(download_server, "_windows_ipconfig_interfaces", lambda: [("new", "10.0.0.2")])
+    assert local_ipv4_interfaces() == [("new", "10.0.0.2")]
+
+
+def test_ipconfig_strips_address_status_suffix(monkeypatch):
+    output = "Ethernet adapter Ethernet:\n   IPv4 Address . . . : 192.168.1.10(Preferred)\n"
+    monkeypatch.setattr(download_server.subprocess, "check_output", lambda *a, **k: output.encode())
+    assert _windows_ipconfig_interfaces() == [("以太网 Ethernet", "192.168.1.10")]
+
+
+def test_mobile_preview_handles_truncated_multibyte_text(tmp_path):
+    path = tmp_path / "large.txt"
+    path.write_text("中文" * 100, encoding="utf-8")
+    assert download_server._read_mobile_text_preview(path, max_bytes=5) == "中\n..."
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))

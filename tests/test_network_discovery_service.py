@@ -77,3 +77,22 @@ def test_handle_datagram_ignores_invalid_messages():
     service.handle_datagram(b"{", "192.168.1.7", seen_at=9.0)
 
     assert service.peers() == []
+
+
+def test_discovery_retries_broadcast_after_network_error():
+    service = DiscoveryService(DeviceIdentity("local", "Local", "host-local", 49200))
+    ticks = iter([0.0, 0.0, 4.0])
+    service._clock = lambda: next(ticks)
+    class ReconnectingSocket(FakeSocket):
+        attempts = 0
+        def sendto(self, data, address):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise OSError("network temporarily unavailable")
+            super().sendto(data, address)
+            service._stop_event.set()
+    sock = ReconnectingSocket()
+    service._socket = sock
+    service._run()
+    assert sock.attempts == 2
+    assert len(sock.sent) == 1

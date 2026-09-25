@@ -1490,13 +1490,21 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         def _open_save_location(self) -> None:
             if not self.paths:
                 return
-            _open_save_location(self.paths)
+            try:
+                _open_save_location(self.paths)
+            except OSError as exc:
+                self.message.setText(f"无法打开保存位置：{exc}")
+                return
             self.close()
 
         def _open_received_item(self) -> None:
             if not self.paths:
                 return
-            _open_received_item(self.paths)
+            try:
+                _open_received_item(self.paths)
+            except OSError as exc:
+                self.message.setText(f"无法打开文件，可能已被移动或删除：{exc}")
+                return
             self.close()
 
     active_toasts: list[ReceiveToast] = []
@@ -1960,7 +1968,7 @@ def _send_items_text(paths: list[Path]) -> str:
     names = "、".join(path.name for path in paths[:3])
     remaining_count = len(paths) - 3
     if remaining_count > 0:
-        return f"{names} 等 {remaining_count} 个"
+        return f"{names} 等 {len(paths)} 个"
     return names
 
 
@@ -1979,20 +1987,24 @@ def _is_text_preview_path(path: Path) -> bool:
 
 
 def _read_text_preview(path: Path, max_bytes: int = 64 * 1024) -> str | None:
+    import codecs
+
     try:
-        data = path.read_bytes()
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
     except OSError:
         return None
-    if len(data) > max_bytes:
-        data = data[:max_bytes]
-    try:
-        text = data.decode("utf-8")
-    except UnicodeDecodeError:
+    truncated = len(data) > max_bytes
+    data = data[:max_bytes]
+    for encoding in ("utf-8-sig", "gbk"):
         try:
-            text = data.decode("gbk")
+            text = codecs.getincrementaldecoder(encoding)().decode(data, final=not truncated)
+            break
         except UnicodeDecodeError:
-            return None
-    if len(text) > 4000:
+            continue
+    else:
+        return None
+    if truncated or len(text) > 4000:
         return f"{text[:4000]}\n..."
     return text
 
@@ -2006,15 +2018,18 @@ def _open_item_button_text(paths: list[Path]) -> str:
 
 
 def _open_save_location(paths: list[Path]) -> None:
-    first_path = paths[0]
-    if first_path.is_file():
-        subprocess.Popen(["explorer", f"/select,{first_path}"])
+    if not paths:
         return
-    _open_path(first_path.parent)
+    # Open the actual containing directory, without Explorer command-line parsing.
+    directory = paths[0].resolve().parent
+    if not directory.is_dir():
+        raise FileNotFoundError(f"保存目录不存在：{directory}")
+    _open_path(directory)
 
 
 def _open_received_item(paths: list[Path]) -> None:
-    _open_path(paths[0])
+    if paths:
+        _open_path(paths[0].resolve())
 
 
 def _open_path(path: Path) -> None:

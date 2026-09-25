@@ -94,7 +94,11 @@ class DiscoveryService:
         while not self._stop_event.is_set():
             now = self._clock()
             if now >= next_broadcast:
-                self._send_hello(sock)
+                try:
+                    self._send_hello(sock)
+                except OSError:
+                    # Network changes are transient; retry on the next interval.
+                    pass
                 next_broadcast = now + self._broadcast_interval
 
             try:

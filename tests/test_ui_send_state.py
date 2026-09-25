@@ -32,3 +32,9 @@ def test_confirmation_text_summarizes_large_path_lists():
     assert "- file-7.txt" in text
     assert "file-8.txt" not in text
     assert "... 另 4 个项目" in text
+
+
+def test_summary_reports_total_not_hidden_count():
+    from localnetftp.ui.tray_app import _send_items_text
+    assert _send_items_text([Path(str(i)) for i in range(5)]).endswith("等 5 个")
+    assert "等 8 个" in confirmation_text([str(i) for i in range(8)], [Path("a.txt")])
