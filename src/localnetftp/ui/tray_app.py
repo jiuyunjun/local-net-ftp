@@ -429,12 +429,18 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.peer_list = QListWidget()
             self.peer_list.setAlternatingRowColors(True)
             self.peer_list.setSelectionMode(QListWidget.ExtendedSelection)
+            self.peer_list.setTextElideMode(Qt.ElideRight)
+            self.peer_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             self.peer_list.setToolTip("同一局域网内运行 LocalNetFTP 的电脑会显示在这里")
             self.peer_list.itemSelectionChanged.connect(self._update_send_button)
 
             self.paste_input = PasteInput(self._paste_clipboard, self._send_typed_text)
+            self.selection_hint = QLabel("选择接收方后拖入文件 · Ctrl 多选")
+            self.selection_hint.setObjectName("transferStatus")
+            self.selection_hint.setWordWrap(True)
             self.transfer_status = QLabel("")
             self.transfer_status.setObjectName("transferStatus")
+            self.transfer_status.setWordWrap(True)
             self.transfer_progress = QProgressBar()
             self.transfer_progress.setObjectName("transferProgress")
             self.transfer_progress.setRange(0, 100)
@@ -446,6 +452,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.setSpacing(6)
             layout.addLayout(title_layout)
             layout.addWidget(self.peer_list, 1)
+            layout.addWidget(self.selection_hint)
             layout.addWidget(self.paste_input)
             layout.addWidget(self.transfer_status)
             layout.addWidget(self.transfer_progress)
@@ -621,7 +628,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             return any(self.peer_list.row(item) == self._mobile_row for item in self.peer_list.selectedItems())
 
         def _update_send_button(self) -> None:
-            return
+            count = len(self.peer_list.selectedItems())
+            self.selection_hint.setText(
+                f"已选 {count} 个接收方 · 拖入文件或粘贴发送" if count
+                else "选择接收方后拖入文件 · Ctrl 多选"
+            )
 
         def _confirm_and_send(self, paths: list[Path]) -> None:
             peers = self._selected_peers()
@@ -750,12 +761,18 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.setWindowTitle("LocalNetFTP 设置")
             self.setMinimumSize(520, 180)
 
+            title = QLabel("设置")
+            title.setObjectName("titleLabel")
+            description = QLabel("管理本机名称、文件保存位置和启动方式")
+            description.setObjectName("mutedLabel")
+            description.setWordWrap(True)
             device_label = QLabel("本机名称")
             self.device_name = QLineEdit()
             self.device_name.setPlaceholderText("例如：客厅电脑")
 
             receive_label = QLabel("接收目录")
             self.receive_dir = QLineEdit()
+            self.receive_dir.setPlaceholderText("选择文件接收目录")
             browse_button = QPushButton("浏览")
             browse_button.clicked.connect(self._choose_receive_dir)
 
@@ -767,9 +784,17 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.confirm_before_send = QCheckBox("发送前显示确认框")
 
             save_button = QPushButton("保存设置")
+            save_button.setObjectName("primaryButton")
             save_button.clicked.connect(self._save)
+            self.status = QLabel("")
+            self.status.setObjectName("statusLabel")
+            self.status.setWordWrap(True)
 
             layout = QVBoxLayout(self)
+            layout.setContentsMargins(14, 14, 14, 14)
+            layout.setSpacing(10)
+            layout.addWidget(title)
+            layout.addWidget(description)
             layout.addWidget(device_label)
             layout.addWidget(self.device_name)
             layout.addWidget(receive_label)
@@ -777,6 +802,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.addWidget(self.start_on_boot)
             layout.addWidget(self.confirm_before_send)
             layout.addStretch(1)
+            layout.addWidget(self.status)
             layout.addWidget(save_button, alignment=Qt.AlignRight)
 
             self.setStyleSheet(_app_stylesheet())
@@ -784,8 +810,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def reload(self) -> None:
             config = self._runtime.config
+            self.status.clear()
             self.device_name.setText(config.device_name)
             self.receive_dir.setText(str(config.receive_dir))
+            self.receive_dir.setCursorPosition(0)
+            self.receive_dir.setToolTip(str(config.receive_dir))
             self.start_on_boot.setChecked(
                 is_start_on_boot_enabled(_current_executable(), app_name="LocalNetFTP")
             )
@@ -797,10 +826,20 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 self.receive_dir.setText(selected)
 
         def _save(self) -> None:
-            receive_dir = Path(self.receive_dir.text()).expanduser()
+            directory_text = self.receive_dir.text().strip()
+            if not directory_text:
+                self.status.setText("请选择接收目录")
+                self.receive_dir.setFocus()
+                return
+            receive_dir = Path(directory_text).expanduser()
+            if not receive_dir.is_absolute():
+                self.status.setText("请填写完整路径，或点击浏览选择目录")
+                self.receive_dir.setFocus()
+                return
             device_name = self.device_name.text().strip()
             if not device_name:
-                QMessageBox.warning(self, "LocalNetFTP", "本机名称不能为空。")
+                self.status.setText("本机名称不能为空")
+                self.device_name.setFocus()
                 return
 
             config = AppConfig(
@@ -810,9 +849,14 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 device_name=device_name,
                 device_id=self._runtime.config.device_id,
             )
-            status = self._runtime.save_settings(config)
+            try:
+                receive_dir.mkdir(parents=True, exist_ok=True)
+                status = self._runtime.save_settings(config)
+            except OSError as exc:
+                self.status.setText(f"无法保存设置：{exc}")
+                return
             self._on_saved(status)
-            QMessageBox.information(self, "LocalNetFTP", "设置已保存。")
+            self.status.setText(status or "设置已保存")
 
     class ShareWindow(QWidget):
         def __init__(self) -> None:
@@ -946,9 +990,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             title = QLabel("从二维码接收文件")
             title.setObjectName("titleLabel")
             label = QLabel("选择与手机同一局域网的网卡。关闭窗口停止接收。")
+            label.setWordWrap(True)
             label.setObjectName("mutedLabel")
             self.status = QLabel("扫描二维码，或点击网址复制")
             self.status.setObjectName("statusLabel")
+            self.status.setWordWrap(True)
 
             self.address_layout = QVBoxLayout()
             self.address_layout.setContentsMargins(0, 0, 0, 0)
@@ -972,14 +1018,20 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.interface = QComboBox()
             self.interface.setEnabled(False)
             self.show_qr = QPushButton("显示二维码")
+            self.show_qr.setObjectName("primaryButton")
             self.show_qr.setEnabled(False)
             self.show_qr.clicked.connect(self._show_selected_qr)
             self.interface.currentIndexChanged.connect(self._hide_qr)
             layout.addWidget(QLabel("接收网卡"))
-            layout.addWidget(self.interface)
-            layout.addWidget(self.show_qr)
+            interface_row = QHBoxLayout()
+            interface_row.addWidget(self.interface, 1)
+            interface_row.addWidget(self.show_qr)
+            layout.addLayout(interface_row)
             destination = QLabel(f"保存到：{runtime.config.receive_dir}")
             destination.setWordWrap(True)
+            destination.setTextFormat(Qt.PlainText)
+            destination.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            destination.setObjectName("mutedLabel")
             layout.addWidget(destination)
             layout.addWidget(scroll_area, 1)
             layout.addWidget(self.status)
@@ -995,13 +1047,15 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._server = server
             self._clear_addresses()
             for address in urls:
-                self.interface.addItem(f"{address.interface_name} · {address.address}", address)
+                self.interface.addItem(f"{address.address} · {address.interface_name}", address)
+            self.interface.setToolTip(self.interface.currentText())
             self.interface.setEnabled(bool(urls))
             self.show_qr.setEnabled(bool(urls))
             self.status.setText("请选择网卡，然后点击显示二维码" if urls else "未找到可用局域网地址，请连接网络后重新打开")
 
         def _hide_qr(self, *_args) -> None:
             self._clear_addresses()
+            self.interface.setToolTip(self.interface.currentText())
             self.status.setText("请选择网卡，然后点击显示二维码")
 
         def _show_selected_qr(self) -> None:
@@ -1144,6 +1198,11 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.status.setObjectName("statusLabel")
 
             receive_button = QPushButton("开始接收")
+            receive_button.setObjectName("primaryButton")
+            receive_button.setEnabled(False)
+            self.ticket_text.textChanged.connect(
+                lambda: receive_button.setEnabled(bool(self.ticket_text.toPlainText().strip()))
+            )
             receive_button.clicked.connect(self._submit)
             close_button = QPushButton("取消")
             close_button.clicked.connect(self.close)
@@ -2222,6 +2281,21 @@ def _app_stylesheet() -> str:
     QLineEdit {
         min-height: 28px;
         padding: 3px 6px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background-color: #ffffff;
+        color: #172033;
+    }
+    QComboBox {
+        min-height: 28px;
+        padding: 3px 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        background-color: #ffffff;
+        color: #172033;
+    }
+    QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus {
+        border: 1px solid #2f7dd1;
     }
     QPlainTextEdit {
         padding: 8px;
@@ -2275,6 +2349,23 @@ def _app_stylesheet() -> str:
     }
     QPushButton:hover {
         background-color: #eef5ff;
+    }
+    QPushButton:focus {
+        border-color: #2f7dd1;
+    }
+    QPushButton#primaryButton {
+        background-color: #2f7dd1;
+        border-color: #2f7dd1;
+        color: #ffffff;
+        font-weight: 600;
+    }
+    QPushButton#primaryButton:hover {
+        background-color: #2269b5;
+    }
+    QPushButton:disabled, QPushButton#primaryButton:disabled, QComboBox:disabled {
+        color: #7c899a;
+        background-color: #e8edf3;
+        border-color: #d8e0ea;
     }
     """
 
