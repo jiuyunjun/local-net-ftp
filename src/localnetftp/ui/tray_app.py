@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import threading
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 import os
@@ -104,6 +104,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
         QWidget,
     )
 
+    from localnetftp.ui.qr_panel import QrPanel
+
     SHARE_PORT = 49300
     MOBILE_SHARE_PORT = 49301
     MOBILE_RECEIVE_PORT = 49302
@@ -144,6 +146,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._on_submit()
 
     class UiEvents(QObject):
+        interface_selected = Signal(str, str)
         received = Signal(object)
         receive_progress = Signal(object)
         send_progress = Signal(object, object, str)
@@ -203,6 +206,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self.mobile_receive_port = _dev_related_port(MOBILE_RECEIVE_PORT, runtime_options.dev_instance, 2)
             save_config(self.config, self.config_path)
             self.log_debug("runtime initialized")
+
+        def remember_interface(self, name: str, address: str) -> None:
+            updated = replace(self.config, preferred_interface_name=name, preferred_interface_address=address)
+            if updated != self.config:
+                save_config(updated, self.config_path)
+                self.config = updated
+                ui_events.interface_selected.emit(name, address)
 
         def log_debug(self, message: str) -> None:
             _append_debug_log(self.debug_log_path, message)
@@ -555,6 +565,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 confirm_before_send=self._runtime.config.confirm_before_send,
                 device_name=device_name,
                 device_id=self._runtime.config.device_id,
+                preferred_interface_name=self._runtime.config.preferred_interface_name,
+                preferred_interface_address=self._runtime.config.preferred_interface_address,
             )
             self.set_status(self._runtime.save_settings(config))
 
@@ -848,6 +860,8 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
                 confirm_before_send=self.confirm_before_send.isChecked(),
                 device_name=device_name,
                 device_id=self._runtime.config.device_id,
+                preferred_interface_name=self._runtime.config.preferred_interface_name,
+                preferred_interface_address=self._runtime.config.preferred_interface_address,
             )
             try:
                 receive_dir.mkdir(parents=True, exist_ok=True)
@@ -889,155 +903,59 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             QApplication.clipboard().setText(url)
             self.copy_status.setText("已复制")
 
-    class MobileShareWindow(QWidget):
-        def __init__(self, runtime: AppRuntime, server: MobileFileShareServer) -> None:
+    class MobileQrWindow(QWidget):
+        def __init__(self, runtime: AppRuntime, receiving: bool) -> None:
             super().__init__()
             self._runtime = runtime
-            self._server = server
-            self.setWindowTitle("手机网页下载")
-            self.setMinimumSize(520, 420)
-
-            title = QLabel("手机网页下载")
+            self._closed = False
+            self.setWindowTitle("从二维码接收文件" if receiving else "手机网页下载")
+            self.setMinimumWidth(520)
+            self.setAttribute(Qt.WA_DeleteOnClose, True)
+            self.setWindowFlag(Qt.Window, True)
+            title = QLabel(self.windowTitle())
             title.setObjectName("titleLabel")
-            label = QLabel("窗口存在期间，手机可访问这些网址下载文件。")
-            label.setObjectName("mutedLabel")
-            self.status = QLabel("扫描二维码，或点击网址复制")
-            self.status.setObjectName("statusLabel")
-
-            self.address_layout = QVBoxLayout()
-            self.address_layout.setContentsMargins(0, 0, 0, 0)
-            self.address_layout.setSpacing(10)
-            address_container = QWidget()
-            address_container.setLayout(self.address_layout)
-
-            scroll_area = QScrollArea()
-            scroll_area.setWidgetResizable(True)
-            scroll_area.setFrameShape(QFrame.NoFrame)
-            scroll_area.setWidget(address_container)
-
-            close_button = QPushButton("停止分享")
-            close_button.clicked.connect(self.close)
-
+            description = QLabel("手机扫码上传文件、图片或文字。关闭窗口停止接收。" if receiving else "手机扫码下载分享的文件。关闭窗口停止分享。")
+            description.setObjectName("mutedLabel")
+            description.setWordWrap(True)
+            self.panel = QrPanel(
+                lambda: (runtime.config.preferred_interface_name, runtime.config.preferred_interface_address),
+                runtime.remember_interface,
+                _qr_pixmap,
+            )
+            ui_events.interface_selected.connect(self.panel.apply_preference)
             layout = QVBoxLayout(self)
             layout.setContentsMargins(14, 14, 14, 14)
             layout.setSpacing(10)
             layout.addWidget(title)
-            layout.addWidget(label)
-            layout.addWidget(scroll_area, 1)
-            layout.addWidget(self.status)
+            layout.addWidget(description)
+            layout.addWidget(self.panel)
+            if receiving:
+                destination = QLabel(f"保存到：{runtime.config.receive_dir}")
+                destination.setObjectName("mutedLabel")
+                destination.setWordWrap(True)
+                destination.setTextFormat(Qt.PlainText)
+                destination.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                layout.addWidget(destination)
+            close_button = QPushButton("停止接收" if receiving else "停止分享")
+            close_button.clicked.connect(self.close)
             layout.addWidget(close_button, alignment=Qt.AlignRight)
             self.setStyleSheet(_app_stylesheet())
-            self._set_urls(server.urls())
 
-        def _set_urls(self, urls: list[ShareAddress]) -> None:
-            while self.address_layout.count():
-                item = self.address_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-            if not urls:
-                self.address_layout.addWidget(QLabel("未找到可用局域网地址"))
-                return
-            for address in urls:
-                self.address_layout.addWidget(self._address_widget(address))
-            self.address_layout.addStretch(1)
+    class MobileShareWindow(MobileQrWindow):
+        def __init__(self, runtime: AppRuntime, server: MobileFileShareServer) -> None:
+            super().__init__(runtime, receiving=False)
+            self._server = server
+            self.panel.set_urls(server.urls())
 
-        def _address_widget(self, address: ShareAddress) -> QWidget:
-            card = QWidget()
-            card.setObjectName("shareAddressCard")
-
-            interface_label = QLabel(address.interface_name)
-            interface_label.setObjectName("shareInterfaceLabel")
-            url_button = QPushButton(address.url)
-            url_button.setObjectName("linkButton")
-            url_button.clicked.connect(lambda: self._copy_url(address.url))
-            qr_label = QLabel()
-            qr_label.setAlignment(Qt.AlignCenter)
-            qr_label.setPixmap(_qr_pixmap(address.url, 4))
-
-            text_layout = QVBoxLayout()
-            text_layout.setContentsMargins(0, 0, 0, 0)
-            text_layout.setSpacing(6)
-            text_layout.addWidget(interface_label)
-            text_layout.addWidget(url_button)
-
-            row_layout = QHBoxLayout(card)
-            row_layout.setContentsMargins(10, 10, 10, 10)
-            row_layout.setSpacing(12)
-            row_layout.addWidget(qr_label)
-            row_layout.addLayout(text_layout, 1)
-            return card
-
-        def _copy_url(self, url: str) -> None:
-            QApplication.clipboard().setText(url)
-            self.status.setText("已复制网址")
-
-        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+        def closeEvent(self, event) -> None:
+            self._closed = True
             self._runtime.stop_mobile_share_server()
             super().closeEvent(event)
 
-    class MobileReceiveWindow(QWidget):
+    class MobileReceiveWindow(MobileQrWindow):
         def __init__(self, runtime: AppRuntime) -> None:
-            super().__init__()
-            self._runtime = runtime
+            super().__init__(runtime, receiving=True)
             self._server: MobileReceiveServer | None = None
-            self._closed = False
-            self.setWindowTitle("从二维码接收文件")
-            self.setMinimumSize(520, 420)
-            self.setAttribute(Qt.WA_DeleteOnClose, True)
-            self.setWindowFlag(Qt.Window, True)
-
-            title = QLabel("从二维码接收文件")
-            title.setObjectName("titleLabel")
-            label = QLabel("选择与手机同一局域网的网卡。关闭窗口停止接收。")
-            label.setWordWrap(True)
-            label.setObjectName("mutedLabel")
-            self.status = QLabel("扫描二维码，或点击网址复制")
-            self.status.setObjectName("statusLabel")
-            self.status.setWordWrap(True)
-
-            self.address_layout = QVBoxLayout()
-            self.address_layout.setContentsMargins(0, 0, 0, 0)
-            self.address_layout.setSpacing(10)
-            address_container = QWidget()
-            address_container.setLayout(self.address_layout)
-
-            scroll_area = QScrollArea()
-            scroll_area.setWidgetResizable(True)
-            scroll_area.setFrameShape(QFrame.NoFrame)
-            scroll_area.setWidget(address_container)
-
-            close_button = QPushButton("停止接收")
-            close_button.clicked.connect(self.close)
-
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(14, 14, 14, 14)
-            layout.setSpacing(10)
-            layout.addWidget(title)
-            layout.addWidget(label)
-            self.interface = QComboBox()
-            self.interface.setEnabled(False)
-            self.show_qr = QPushButton("显示二维码")
-            self.show_qr.setObjectName("primaryButton")
-            self.show_qr.setEnabled(False)
-            self.show_qr.clicked.connect(self._show_selected_qr)
-            self.interface.currentIndexChanged.connect(self._hide_qr)
-            layout.addWidget(QLabel("接收网卡"))
-            interface_row = QHBoxLayout()
-            interface_row.addWidget(self.interface, 1)
-            interface_row.addWidget(self.show_qr)
-            layout.addLayout(interface_row)
-            destination = QLabel(f"保存到：{runtime.config.receive_dir}")
-            destination.setWordWrap(True)
-            destination.setTextFormat(Qt.PlainText)
-            destination.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            destination.setObjectName("mutedLabel")
-            layout.addWidget(destination)
-            layout.addWidget(scroll_area, 1)
-            layout.addWidget(self.status)
-            layout.addWidget(close_button, alignment=Qt.AlignRight)
-            self.setStyleSheet(_app_stylesheet())
-            self._set_loading()
 
         @property
         def is_closed(self) -> bool:
@@ -1045,84 +963,13 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def set_ready(self, server: MobileReceiveServer, urls: list[ShareAddress]) -> None:
             self._server = server
-            self._clear_addresses()
-            for address in urls:
-                self.interface.addItem(f"{address.address} · {address.interface_name}", address)
-            self.interface.setToolTip(self.interface.currentText())
-            self.interface.setEnabled(bool(urls))
-            self.show_qr.setEnabled(bool(urls))
-            self.status.setText("请选择网卡，然后点击显示二维码" if urls else "未找到可用局域网地址，请连接网络后重新打开")
-
-        def _hide_qr(self, *_args) -> None:
-            self._clear_addresses()
-            self.interface.setToolTip(self.interface.currentText())
-            self.status.setText("请选择网卡，然后点击显示二维码")
-
-        def _show_selected_qr(self) -> None:
-            address = self.interface.currentData()
-            if address is not None:
-                self._set_urls([address])
-                self.status.setText("手机扫码上传；无法打开时请检查同一 Wi-Fi 和防火墙")
+            self.panel.set_urls(urls)
 
         def set_error(self, message: str) -> None:
-            self.status.setText(message)
-            self._set_urls([])
+            self.panel.set_urls([])
+            self.panel.status.setText(message)
 
-        def _set_loading(self) -> None:
-            self.status.setText("正在初始化...")
-            self._clear_addresses()
-            loading = QLabel("正在启动手机接收服务...")
-            loading.setObjectName("statusLabel")
-            self.address_layout.addWidget(loading)
-            self.address_layout.addStretch(1)
-
-        def _set_urls(self, urls: list[ShareAddress]) -> None:
-            self._clear_addresses()
-            if not urls:
-                self.address_layout.addWidget(QLabel("未找到可用局域网地址"))
-                return
-            for address in urls:
-                self.address_layout.addWidget(self._address_widget(address))
-            self.address_layout.addStretch(1)
-
-        def _clear_addresses(self) -> None:
-            while self.address_layout.count():
-                item = self.address_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None:
-                    widget.deleteLater()
-
-        def _address_widget(self, address: ShareAddress) -> QWidget:
-            card = QWidget()
-            card.setObjectName("shareAddressCard")
-
-            interface_label = QLabel(address.interface_name)
-            interface_label.setObjectName("shareInterfaceLabel")
-            url_button = QPushButton(address.url)
-            url_button.setObjectName("linkButton")
-            url_button.clicked.connect(lambda: self._copy_url(address.url))
-            qr_label = QLabel()
-            qr_label.setAlignment(Qt.AlignCenter)
-            qr_label.setPixmap(_qr_pixmap(address.url, 4))
-
-            text_layout = QVBoxLayout()
-            text_layout.setContentsMargins(0, 0, 0, 0)
-            text_layout.setSpacing(6)
-            text_layout.addWidget(interface_label)
-            text_layout.addWidget(url_button)
-
-            row_layout = QHBoxLayout(card)
-            row_layout.setContentsMargins(10, 10, 10, 10)
-            row_layout.setSpacing(12)
-            row_layout.addWidget(qr_label)
-            row_layout.addLayout(text_layout, 1)
-            return card
-
-        def _copy_url(self, url: str) -> None:
-            QApplication.clipboard().setText(url)
-            self.status.setText("已复制网址")
-
-        def closeEvent(self, event) -> None:  # noqa: N802 - Qt method name
+        def closeEvent(self, event) -> None:
             self._closed = True
             self._runtime.stop_mobile_receive_server_async()
             super().closeEvent(event)

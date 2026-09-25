@@ -20,6 +20,8 @@ class AppConfig:
     confirm_before_send: bool = True
     device_name: str = ""
     device_id: str = ""
+    preferred_interface_name: str = ""
+    preferred_interface_address: str = ""
 
     def to_json_data(self) -> dict[str, Any]:
         data = asdict(self)
@@ -122,10 +124,18 @@ def _config_from_json_data(raw_data: object) -> AppConfig:
     else:
         raise ValueError("Config field 'device_id' must be a non-empty string.")
 
+    preferences = {}
+    for key in ("preferred_interface_name", "preferred_interface_address"):
+        value = raw_data.get(key, "")
+        if not isinstance(value, str):
+            raise ValueError(f"Config field '{key}' must be a string.")
+        preferences[key] = value.strip()
+
     return AppConfig(
         receive_dir=receive_path,
         start_on_boot=start_on_boot,
         confirm_before_send=confirm_before_send,
         device_name=display_name,
         device_id=local_device_id,
+        **preferences,
     )

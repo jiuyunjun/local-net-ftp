@@ -71,6 +71,8 @@ def test_save_and_load_config_round_trip(tmp_path):
         "confirm_before_send": False,
         "device_name": "A-PC",
         "device_id": "device-a",
+        "preferred_interface_name": "",
+        "preferred_interface_address": "",
     }
 
 
@@ -112,3 +114,14 @@ def test_load_config_rejects_invalid_device_id(tmp_path):
 
     with pytest.raises(ValueError, match="device_id"):
         load_config(config_path)
+
+
+def test_preferred_interface_round_trip_and_old_config(tmp_path):
+    path = tmp_path / "config.json"
+    config = AppConfig(receive_dir=tmp_path, device_name="Test", device_id="test-id", preferred_interface_name="Wi-Fi", preferred_interface_address="192.168.1.2")
+    save_config(config, path)
+    restored = load_config(path)
+    assert restored.preferred_interface_name == "Wi-Fi"
+    assert restored.preferred_interface_address == "192.168.1.2"
+    path.write_text('{}', encoding="utf-8")
+    assert load_config(path).preferred_interface_name == ""
