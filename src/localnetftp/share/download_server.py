@@ -18,6 +18,7 @@ from typing import Callable
 
 from flask import Flask, abort, request, send_file
 from werkzeug.serving import make_server
+from werkzeug.exceptions import HTTPException
 
 from localnetftp.transfer import available_destination_path
 
@@ -491,6 +492,18 @@ class MobileReceiveServer:
         self.receive_dir.mkdir(parents=True, exist_ok=True)
         app = Flask(__name__)
 
+        @app.errorhandler(HTTPException)
+        def http_error(error):
+            message = (
+                "上传请求过大或项目过多，请刷新页面重试，或将日志保存为文件上传"
+                if error.code == 413 else f"上传请求失败（HTTP {error.code}）"
+            )
+            return {"message": message}, error.code
+
+        @app.errorhandler(OSError)
+        def storage_error(error):
+            return {"message": "电脑保存失败，请检查接收目录权限和剩余磁盘空间"}, 500
+
         @app.get("/")
         def index():
             return """<!doctype html>
@@ -602,7 +615,11 @@ class MobileReceiveServer:
       event.preventDefault();
       const button = form.querySelector('button[type="submit"]');
       if (button.disabled) return;
-      const body = new FormData(form);
+      // Send text as a file part: large logs can spool to disk on the receiver.
+      const body = new FormData();
+      Array.from(form.elements.files.files).forEach(file => body.append('files', file));
+      const text = form.elements.text.value;
+      if (text.trim()) body.append('text_file', new Blob([text], {type: 'text/plain;charset=utf-8'}), 'text.txt');
       images.forEach((file, index) => body.append('files', file, file.name || ('粘贴图片_' + index + '.png')));
       if (!Array.from(body.getAll('files')).some(file => file.name) && !form.elements.text.value.trim()) {
         status.textContent = '请选择文件、粘贴图片或输入文字';
@@ -613,14 +630,17 @@ class MobileReceiveServer:
       status.textContent = '正在发送...';
       try {
         const response = await fetch('/upload', {method: 'POST', body});
-        const payload = await response.json();
-        if (!response.ok) throw new Error(payload.message || '发送失败');
+        const raw = await response.text();
+        let payload;
+        try { payload = JSON.parse(raw); } catch (_) { payload = null; }
+        if (!response.ok) throw new Error(payload?.message || ('服务器返回 HTTP ' + response.status));
+        if (!payload || typeof payload.count !== 'number') throw new Error('服务器返回了无法识别的响应');
         status.textContent = payload.message || '已保存到电脑';
         form.reset();
         images.length = 0;
         pasted.replaceChildren();
       } catch (error) {
-        status.textContent = '发送失败：' + error.message + '。内容已保留，请检查连接后重试。';
+        status.textContent = '发送失败：' + error.message + '。内容已保留，可重试。';
       } finally {
         controls.forEach(control => control.disabled = false);
       }
@@ -639,8 +659,12 @@ class MobileReceiveServer:
                 destination = _save_mobile_stream(destination, storage.stream)
                 saved_paths.append(destination)
 
+            text_file = request.files.get("text_file")
             text = request.form.get("text", "")
-            if text.strip():
+            if text_file is not None:
+                destination = _save_mobile_stream(_available_mobile_text_path(self.receive_dir), text_file.stream)
+                saved_paths.append(destination)
+            elif text.strip():
                 destination = _available_mobile_text_path(self.receive_dir)
                 import io
 

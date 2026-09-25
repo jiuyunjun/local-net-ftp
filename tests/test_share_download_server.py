@@ -191,6 +191,40 @@ def test_mobile_concurrent_uploads_do_not_overwrite(tmp_path):
     assert {path.read_bytes() for path in paths} == {str(i).encode() for i in range(20)}
 
 
+def test_mobile_long_log_file_part_preserves_exact_utf8(tmp_path):
+    log = ("2026-09-25 ERROR 中文日志 😀\r\n  traceback: <value>\n" * 100000).encode("utf-8")
+    received = []
+    server = MobileReceiveServer(tmp_path, port=0, host="127.0.0.1", on_received=received.append)
+    server.start()
+    try:
+        response = server._server.app.test_client().post("/upload", data={
+            "text_file": (io.BytesIO(log), "text.txt"),
+            "files": (io.BytesIO(b"photo"), "photo.png"),
+        })
+        assert response.status_code == 200
+        assert response.json["count"] == 2
+        assert next(tmp_path.glob("手机文字_*.txt")).read_bytes() == log
+        assert (tmp_path / "photo.png").read_bytes() == b"photo"
+        assert len(received[0]) == 2
+    finally:
+        server.stop()
+
+
+def test_mobile_form_limit_returns_json_error_without_saving(tmp_path):
+    server = MobileReceiveServer(tmp_path, port=0, host="127.0.0.1")
+    server.start()
+    try:
+        response = server._server.app.test_client().post("/upload", data={
+            "text": "log line\n" * 100000,
+        }, content_type="multipart/form-data")
+        assert response.status_code == 413
+        assert response.is_json
+        assert "刷新页面" in response.json["message"]
+        assert not list(tmp_path.iterdir())
+    finally:
+        server.stop()
+
+
 def test_mobile_failed_write_removes_partial_file(tmp_path):
     import pytest
     from localnetftp.share.download_server import _save_mobile_stream
