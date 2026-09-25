@@ -85,6 +85,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
+        QComboBox,
         QFileDialog,
         QFrame,
         QHBoxLayout,
@@ -937,14 +938,14 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             self._runtime = runtime
             self._server: MobileReceiveServer | None = None
             self._closed = False
-            self.setWindowTitle("从手机接收")
+            self.setWindowTitle("从二维码接收文件")
             self.setMinimumSize(520, 420)
             self.setAttribute(Qt.WA_DeleteOnClose, True)
             self.setWindowFlag(Qt.Window, True)
 
-            title = QLabel("从手机接收")
+            title = QLabel("从二维码接收文件")
             title.setObjectName("titleLabel")
-            label = QLabel("窗口存在期间，手机可访问这些网址上传文件、图片或文字。")
+            label = QLabel("选择与手机同一局域网的网卡。关闭窗口停止接收。")
             label.setObjectName("mutedLabel")
             self.status = QLabel("扫描二维码，或点击网址复制")
             self.status.setObjectName("statusLabel")
@@ -968,6 +969,18 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
             layout.setSpacing(10)
             layout.addWidget(title)
             layout.addWidget(label)
+            self.interface = QComboBox()
+            self.interface.setEnabled(False)
+            self.show_qr = QPushButton("显示二维码")
+            self.show_qr.setEnabled(False)
+            self.show_qr.clicked.connect(self._show_selected_qr)
+            self.interface.currentIndexChanged.connect(self._hide_qr)
+            layout.addWidget(QLabel("接收网卡"))
+            layout.addWidget(self.interface)
+            layout.addWidget(self.show_qr)
+            destination = QLabel(f"保存到：{runtime.config.receive_dir}")
+            destination.setWordWrap(True)
+            layout.addWidget(destination)
             layout.addWidget(scroll_area, 1)
             layout.addWidget(self.status)
             layout.addWidget(close_button, alignment=Qt.AlignRight)
@@ -980,8 +993,22 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
         def set_ready(self, server: MobileReceiveServer, urls: list[ShareAddress]) -> None:
             self._server = server
-            self.status.setText("扫描二维码，或点击网址复制")
-            self._set_urls(urls)
+            self._clear_addresses()
+            for address in urls:
+                self.interface.addItem(f"{address.interface_name} · {address.address}", address)
+            self.interface.setEnabled(bool(urls))
+            self.show_qr.setEnabled(bool(urls))
+            self.status.setText("请选择网卡，然后点击显示二维码" if urls else "未找到可用局域网地址，请连接网络后重新打开")
+
+        def _hide_qr(self, *_args) -> None:
+            self._clear_addresses()
+            self.status.setText("请选择网卡，然后点击显示二维码")
+
+        def _show_selected_qr(self) -> None:
+            address = self.interface.currentData()
+            if address is not None:
+                self._set_urls([address])
+                self.status.setText("手机扫码上传；无法打开时请检查同一 Wi-Fi 和防火墙")
 
         def set_error(self, message: str) -> None:
             self.status.setText(message)
@@ -1831,7 +1858,7 @@ def run_tray_app(options: RuntimeOptions | None = None) -> int:
 
     menu = QMenu()
     share_action = QAction("投送模式", menu)
-    mobile_receive_action = QAction("从手机接收", menu)
+    mobile_receive_action = QAction("从二维码接收文件", menu)
     receive_ticket_action = QAction("输入 ticket 接收文件", menu)
     settings_action = QAction("设置", menu)
     quit_action = QAction("退出", menu)

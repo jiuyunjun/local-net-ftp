@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import locale
+import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -555,7 +557,9 @@ class MobileReceiveServer:
     <p>选择文件、图片，或输入文字发送到电脑。</p>
     <form id="uploadForm">
       <input name="files" type="file" multiple>
-      <textarea name="text" placeholder="输入文字"></textarea>
+      <textarea name="text" placeholder="输入或粘贴文字，也可在这里粘贴图片"></textarea>
+      <small>支持单个或多个文件。若手机浏览器不支持粘贴图片，请用上方文件选择器选择照片。</small>
+      <div id="pasted"></div>
       <button type="submit">发送到电脑</button>
       <output id="status"></output>
     </form>
@@ -563,19 +567,56 @@ class MobileReceiveServer:
   <script>
     const form = document.getElementById('uploadForm');
     const status = document.getElementById('status');
+    const pasted = document.getElementById('pasted');
+    const images = [];
+    form.elements.text.addEventListener('paste', event => {
+      const files = Array.from(event.clipboardData?.files || []).filter(file => file.type.startsWith('image/'));
+      if (!files.length) return;
+      event.preventDefault();
+      const text = event.clipboardData.getData('text/plain');
+      if (text) form.elements.text.setRangeText(text, form.elements.text.selectionStart, form.elements.text.selectionEnd, 'end');
+      files.forEach(file => {
+        images.push(file);
+        const row = document.createElement('div');
+        const preview = document.createElement('img');
+        const url = URL.createObjectURL(file);
+        preview.src = url;
+        preview.alt = file.name || '粘贴图片';
+        preview.style.cssText = 'max-width:100%;max-height:160px;display:block;margin:8px 0';
+        preview.onload = () => URL.revokeObjectURL(url);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '移除图片';
+        remove.onclick = () => { images.splice(images.indexOf(file), 1); row.remove(); };
+        row.append(preview, remove);
+        pasted.append(row);
+      });
+    });
     form.addEventListener('submit', async event => {
       event.preventDefault();
+      const button = form.querySelector('button[type="submit"]');
+      if (button.disabled) return;
+      const body = new FormData(form);
+      images.forEach((file, index) => body.append('files', file, file.name || ('粘贴图片_' + index + '.png')));
+      if (!Array.from(body.getAll('files')).some(file => file.name) && !form.elements.text.value.trim()) {
+        status.textContent = '请选择文件、粘贴图片或输入文字';
+        return;
+      }
+      const controls = Array.from(form.querySelectorAll('input, textarea, button'));
+      controls.forEach(control => control.disabled = true);
       status.textContent = '正在发送...';
-      const response = await fetch('/upload', {
-        method: 'POST',
-        body: new FormData(form)
-      });
-      if (response.ok) {
+      try {
+        const response = await fetch('/upload', {method: 'POST', body});
         const payload = await response.json();
-        status.textContent = payload.message || '已发送';
+        if (!response.ok) throw new Error(payload.message || '发送失败');
+        status.textContent = payload.message || '已保存到电脑';
         form.reset();
-      } else {
-        status.textContent = '发送失败';
+        images.length = 0;
+        pasted.replaceChildren();
+      } catch (error) {
+        status.textContent = '发送失败：' + error.message + '。内容已保留，请检查连接后重试。';
+      } finally {
+        controls.forEach(control => control.disabled = false);
       }
     });
   </script>
@@ -589,21 +630,22 @@ class MobileReceiveServer:
                 if not storage.filename:
                     continue
                 destination = _available_mobile_upload_path(self.receive_dir, storage.filename)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                storage.save(destination)
+                destination = _save_mobile_stream(destination, storage.stream)
                 saved_paths.append(destination)
 
             text = request.form.get("text", "")
             if text.strip():
                 destination = _available_mobile_text_path(self.receive_dir)
-                destination.write_text(text, encoding="utf-8")
+                import io
+
+                destination = _save_mobile_stream(destination, io.BytesIO(text.encode("utf-8")))
                 saved_paths.append(destination)
 
             if not saved_paths:
                 return {"message": "请选择文件或输入文字"}, 400
             if self._on_received is not None:
                 self._on_received(saved_paths)
-            return {"message": f"已发送 {len(saved_paths)} 个项目", "count": len(saved_paths)}
+            return {"message": f"已保存 {len(saved_paths)} 个项目到电脑", "count": len(saved_paths)}
 
         self._server = make_server(self.host, self.port, app, threaded=True)
         self._thread = threading.Thread(
@@ -711,10 +753,30 @@ def _available_mobile_text_path(receive_dir: Path, now: datetime | None = None) 
 
 def _safe_upload_filename(filename: str) -> str:
     normalized = filename.replace("\\", "/")
-    name = Path(normalized).name.strip().strip(".")
+    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', Path(normalized).name).strip().strip(".")
+    name = name[:180].rstrip(" .")
+    if name.split(".")[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        name = "_" + name
     if not name:
         return "手机上传文件"
     return name
+
+
+def _save_mobile_stream(destination: Path, stream) -> Path:
+    """Reserve exclusively so concurrent uploads never overwrite each other."""
+    while True:
+        try:
+            target = destination.open("xb")
+            break
+        except FileExistsError:
+            destination = available_destination_path(destination)
+    try:
+        with target:
+            shutil.copyfileobj(stream, target, length=1024 * 1024)
+    except BaseException:
+        destination.unlink(missing_ok=True)
+        raise
+    return destination
 
 
 def _format_file_size(size: int) -> str:

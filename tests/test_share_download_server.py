@@ -160,6 +160,56 @@ def test_normalize_interface_name_repairs_ethernet_question_marks():
     assert _normalize_interface_name("Ethernet adapter Ethernet 2") == "以太网 Ethernet 2"
 
 
+def test_mobile_receive_multiple_files_and_empty_submission(tmp_path):
+    from werkzeug.datastructures import MultiDict
+    server = MobileReceiveServer(tmp_path, port=_free_port(), host="127.0.0.1")
+    server.start()
+    try:
+        client = server._server.app.test_client()
+        assert client.post("/upload").status_code == 400
+        response = client.post("/upload", data=MultiDict([
+            ("files", (io.BytesIO(b"one"), "first.txt")),
+            ("files", (io.BytesIO(b"photo"), "photo.png")),
+            ("text", "中文\nsecond line"),
+        ]))
+        assert response.json["count"] == 3
+        assert (tmp_path / "first.txt").read_bytes() == b"one"
+        assert (tmp_path / "photo.png").read_bytes() == b"photo"
+        assert next(tmp_path.glob("手机文字_*.txt")).read_text(encoding="utf-8") == "中文\nsecond line"
+    finally:
+        server.stop()
+
+
+def test_mobile_concurrent_uploads_do_not_overwrite(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from localnetftp.share.download_server import _save_mobile_stream
+    def save(index):
+        return _save_mobile_stream(tmp_path / "same.txt", io.BytesIO(str(index).encode()))
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        paths = list(pool.map(save, range(20)))
+    assert len(set(paths)) == 20
+    assert {path.read_bytes() for path in paths} == {str(i).encode() for i in range(20)}
+
+
+def test_mobile_failed_write_removes_partial_file(tmp_path):
+    import pytest
+    from localnetftp.share.download_server import _save_mobile_stream
+    class BrokenStream:
+        def read(self, size):
+            raise OSError("disconnected")
+    with pytest.raises(OSError):
+        _save_mobile_stream(tmp_path / "partial.txt", BrokenStream())
+    assert not list(tmp_path.iterdir())
+
+
+def test_mobile_windows_upload_names_are_safe():
+    from localnetftp.share.download_server import _safe_upload_filename
+    assert _safe_upload_filename("../../photo.png") == "photo.png"
+    assert _safe_upload_filename("CON.txt") == "_CON.txt"
+    assert _safe_upload_filename("file.txt:stream") == "file.txt_stream"
+    assert _safe_upload_filename("...") == "手机上传文件"
+
+
 def test_decode_windows_command_output_uses_locale_encoding(monkeypatch):
     monkeypatch.setattr("localnetftp.share.download_server.locale.getpreferredencoding", lambda _: "cp932")
 
